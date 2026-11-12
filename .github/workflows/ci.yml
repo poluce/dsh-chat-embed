@@ -1,0 +1,78 @@
+# 每次推送到 master、每个 PR、每个版本 tag 都跑完整门禁。
+#
+# 这个仓库没有运行时依赖，也没有 lock 文件，所以正常情况下不需要 install 步骤；
+# 装了依赖之后 `npm ci` 会自动接上（见下面的条件步骤）。
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*.*.*']
+  pull_request:
+
+# 同一个分支的旧运行没有价值，但 tag 触发的运行不能被打断。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 是 engines 的下界（OIDC 需要 22.14.0），24 是本地开发版本。
+        node: ['22', '24']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 无依赖时跳过；一旦加了 dependencies 或 devDependencies，锁文件出现，这步生效。
+      - name: Install
+        if: hashFiles('package-lock.json') != ''
+        run: npm ci
+
+      - name: Gate (bundle checks + contract tests)
+        run: npm run check
+
+      # 发布出去的到底是什么，让日志里能看见：文件清单 + 打包体积。
+      - name: Show the packed file list
+        run: npm pack --dry-run
+
+      # tag 与 package.json 不一致是这类仓库最常见的发布事故。
+      - name: Tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json ${expected}"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches package.json ${expected}"
+
+      # client.js 里的 BUILD 与 package.json 的 version 必须一致，
+      # 否则面板显示的版本号是假的。契约测试已覆盖，这里再显式报一次。
+      - name: client BUILD matches package.json version
+        run: |
+          set -euo pipefail
+          pkg="$(node -p "require('./package.json').version")"
+          build="$(node -p "require('node:fs').readFileSync('client.js','utf8').match(/const BUILD = '([^']+)'/)[1]")"
+          if [ "${pkg}" != "${build}" ]; then
+            echo "::error::client.js BUILD ${build} does not match package.json ${pkg}"
+            exit 1
+          fi
+          echo "BUILD ${build} matches package.json ${pkg}"
