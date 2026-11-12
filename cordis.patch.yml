@@ -1,0 +1,11 @@
+# dsh-chat-embed — bundle composition.
+#
+# Installed into a dsh profile through `plugin_manager install_bundle` or
+# `dsh plugin add <spec>`; the loader row below inserts this bundle's plugin
+# entry into that profile's composition.
+#
+#   id   — the loader entry id, unique inside the profile.
+#   name — must equal this package's `name` field.
+- insert:
+    - id: chat-embed
+      name: 'dsh-chat-embed'

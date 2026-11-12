@@ -1,0 +1,31 @@
+# 自动维护固定到 commit SHA 的 GitHub Action。
+#
+# ci.yml 里的 action 都是 `uses: owner/action@<40 位 SHA> # vX.Y.Z` 的形式。
+# Dependabot 认得行尾的版本注释，会把 SHA 换成新版本的完整 SHA 并同步更新注释。
+
+version: 2
+updates:
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+      time: '03:00'
+      timezone: 'Asia/Shanghai'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'ci'
+    labels:
+      - 'dependencies'
+      - 'ci'
+    # 同一周的所有 action 升级合成一个 PR，避免每个 action 各开一条。
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+
+  # 这个包没有运行时依赖（package.json 里没有 dependencies / devDependencies），
+  # 所以不声明 npm 生态，否则 Dependabot 会为一个空依赖树反复开会话。
