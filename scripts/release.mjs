@@ -10,8 +10,8 @@
  *
  *   1. bump       package.json / client.js BUILD / README 历史 / 两份文档
  *   2. gate       npm run check
- *   3. commit     单提交（--orphan 重写 + gc）
- *   4. push       强推 master，触发 CI
+ *   3. commit     普通提交
+ *   4. push       master，触发 CI
  *   5. ci         等这次推送的 CI 跑完，红了就停
  *   6. publish    npm publish（唯一不可逆的一步，因此排在 tag 之前）
  *      tag        tag + 推送（CI 再校验一次 tag == version）
@@ -236,24 +236,17 @@ function bump(version, summary) {
 }
 
 /**
- * Build this release's commit message from the existing one.
+ * Build this release's commit message.
  *
- * The repository keeps a single commit whose message carries the long project
- * description. Reusing it keeps that description, swaps the version in the title
- * and adds this release's summary as the first body paragraph.
+ * History is ordinary now, so each commit describes only its own release instead
+ * of repeating a project description — that is what the long first commit is for.
  *
  * @param {string} version
  * @param {string} summary
  * @returns {string}
  */
 function commitMessage(version, summary) {
-  const current = capture('git', ['log', '-1', '--format=%B'], { allowFailure: true })
-  const lines = current === '' ? ['dsh-chat-embed ' + version] : current.split('\n')
-  lines[0] = lines[0].replace(/^dsh-chat-embed [\d.]+/, 'dsh-chat-embed ' + version)
-  const firstBlank = lines.indexOf('')
-  if (firstBlank === -1) return lines.concat(['', summary]).join('\n')
-  lines.splice(firstBlank + 1, 0, '', summary)
-  return lines.join('\n')
+  return 'dsh-chat-embed ' + version + ': ' + summary
 }
 
 /**
@@ -398,33 +391,28 @@ async function main() {
   }
 
   if (should('commit')) {
-    step('3/6 commit  单提交重写')
+    step('3/6 commit  提交')
     if (dry) {
       say('  [dry-run] 跳过')
-    } else if (dirty === '' && capture('git', ['rev-list', '--count', 'HEAD']) === '1') {
-      // 续做：上一轮已经提交过，工作树干净，没有东西可重写。
-      say('  工作树干净且已是单提交，跳过重写')
     } else {
-      const messageFile = join(ROOT, '.git', 'RELEASE_MESSAGE_TMP')
-      writeFileSync(messageFile, commitMessage(version, summary))
-      capture('git', ['branch', '-D', 'release-tmp'], { allowFailure: true })
-      run('git', ['checkout', '--orphan', 'release-tmp'])
       run('git', ['add', '-A'])
-      run('git', ['commit', '-q', '-F', messageFile])
-      rmSync(messageFile, { force: true })
-      run('git', ['branch', '-M', 'master'])
-      run('git', ['reflog', 'expire', '--expire=now', '--all'])
-      run('git', ['gc', '--prune=now', '--quiet'])
-      const count = capture('git', ['rev-list', '--count', 'HEAD'])
-      if (count !== '1') die('提交数应为 1，实际是 ' + count)
-      say('  单提交 ' + capture('git', ['rev-parse', '--short', 'HEAD']))
+      if (capture('git', ['status', '--porcelain']) === '') {
+        // 续做：上一轮已经提交过，工作树干净。
+        say('  工作树干净，没有需要提交的改动')
+      } else {
+        const messageFile = join(ROOT, '.git', 'RELEASE_MESSAGE_TMP')
+        writeFileSync(messageFile, commitMessage(version, summary))
+        run('git', ['commit', '-q', '-F', messageFile])
+        rmSync(messageFile, { force: true })
+        say('  提交 ' + capture('git', ['rev-parse', '--short', 'HEAD']))
+      }
     }
   }
 
   if (should('push')) {
-    step('4/6 push  强推 master')
+    step('4/6 push  推送 master')
     if (dry) say('  [dry-run] 跳过')
-    else run('git', ['push', '--force', 'origin', 'master'])
+    else run('git', ['push', 'origin', 'master'])
   }
 
   if (should('ci')) {
@@ -482,7 +470,7 @@ async function main() {
   }
 
   step('验证')
-  say('  提交        ' + capture('git', ['rev-parse', '--short', 'HEAD']) + '（' + capture('git', ['rev-list', '--count', 'HEAD']) + ' 个提交）')
+  say('  提交        ' + capture('git', ['rev-parse', '--short', 'HEAD']) + '（历史共 ' + capture('git', ['rev-list', '--count', 'HEAD']) + ' 个提交）')
   say('  npm 可见    ' + ((await publishedOnNpm(version)) ? '是' : '否'))
   const tarball = join(ROOT, 'dist', PKG + '-' + version + '.tgz')
   if (existsSync(tarball)) {

@@ -7,7 +7,7 @@
 - 同时改 `package.json` 的 `version` 与 `client.js` 的 `BUILD`，两者必须一致（CI 与契约测试都会拦）；
 - 门禁必须绿：`npm run check`（`verify-bundle` + 85 项契约测试）；
 - 代码注释/提交信息英文，文档中文；
-- 仓库保持**单提交**：每次发版用 `--orphan` + `gc --prune=now` 重写历史后强推 master。**tag 不移动**——它标记的是已发布的那次提交。
+- 提交历史正常累积，**不再重写**：发版就是一次普通提交 + 普通 push。tag 不移动——它标记的是当时发布的那次提交。
 
 ## CI
 
@@ -38,8 +38,8 @@ node scripts/release.mjs 0.6.7 --summary "一句话说明这次改了什么"
 | --- | --- | --- |
 | bump | 改 `package.json` / `client.js` 的 `BUILD` / README 版本历史 / 两份文档 | 值相同就不动 |
 | gate | `npm run check` | — |
-| commit | `--orphan` 重写 + `gc --prune=now`，保持单提交 | — |
-| push | 强推 master，触发 CI | — |
+| commit | `git add -A` + 普通提交 | 工作树干净则跳过 |
+| push | 推送 master，触发 CI | — |
 | ci | 等这次推送的 CI 跑完，红了就停 | — |
 | publish | `npm publish` | registry 上已有该版本则跳过 |
 | tag | 打 tag 并推送（CI 再校验一次） | tag 已存在则跳过 |
@@ -55,13 +55,13 @@ node scripts/release.mjs 0.6.7 --summary "..." --stop-after gate  # 做完 bump+
 node scripts/release.mjs 0.6.7 --summary "..." --notes dist\notes.md   # Release 用独立说明文件
 ```
 
-提交信息由脚本从**当前那条提交**继承：保留原来的项目描述，只换标题里的版本号，并把 `--summary` 作为正文第一段。这样单提交里那份长描述不会因为发版而丢失。
+每条提交只描述自己这次发布（`dsh-chat-embed <版本>: <summary>`）。项目长描述只留在历史第一条提交里，不再随版本重复。
 
 ### 手动等价步骤（脚本出问题时的兜底）
 
 ```powershell
 npm run check                       # 1. 本地门禁
-#                                   2. --orphan 重写 + gc --prune=now + 强推 master
+#                                   2. git add -A && git commit && git push
 gh run list --repo poluce/dsh-chat-embed --limit 1   # 3. 等 CI 绿
 npm publish                         # 4. 发布到 npm（prepack 会自动再跑一次门禁）
 git tag v<版本>                      # 5. 打 tag 并推送
@@ -95,7 +95,7 @@ Get-FileHash $env:TEMP\check\dsh-chat-embed-<版本>.tgz -Algorithm SHA256
 2. 该配置**必须在 2 天内完成首次成功发布**，否则过期；
 3. 需要 workflow 带 `id-token: write`、GitHub-hosted runner、npm CLI ≥ 11.5.1、Node ≥ 22.14.0（`engines` 已收紧）。
 
-⚠️ 一个已知冲突：provenance 把包绑定到发布时的 commit SHA，而本仓库每次发版都重写历史并 `gc --prune=now`，旧版本的 commit 会变成不可达对象，npm 页面上"source commit"链接最终会失效。要么接受旧版本链接腐烂，要么保留历史。
+提交历史正常累积之后，provenance 里的 commit SHA 会长期可达，npm 页面上的"source commit"链接不会失效。
 
 ## 当前发布物
 
@@ -103,8 +103,8 @@ Get-FileHash $env:TEMP\check\dsh-chat-embed-<版本>.tgz -Algorithm SHA256
 | --- | --- |
 | 仓库 | <https://github.com/poluce/dsh-chat-embed> |
 | Release | <https://github.com/poluce/dsh-chat-embed/releases> |
-| 分发包 | `dsh-chat-embed-0.6.7.tgz`（16 个文件，约 70 kB） |
-| npm | `dsh-chat-embed@0.6.7`（<https://www.npmjs.com/package/dsh-chat-embed>，维护者 `poluce_auto`） |
+| 分发包 | `dsh-chat-embed-0.6.8.tgz`（16 个文件，约 70 kB） |
+| npm | `dsh-chat-embed@0.6.8`（<https://www.npmjs.com/package/dsh-chat-embed>，维护者 `poluce_auto`） |
 | 商店图标 | `assets/icon-180.png`（180×180 PNG） |
 | 商店截图 | `assets/screenshots/` + 仓库根 `screenshots.json`（6 张） |
 
@@ -123,7 +123,7 @@ dsh plugin --profile desktop add git+https://github.com/poluce/dsh-chat-embed.gi
 
 1. 注册账号并完成邮箱验证：<https://www.npmjs.com/signup>；
 2. 本机登录：`npm login`（浏览器确认或一次性密码；开了 2FA 输入验证码）；
-3. 发布：`npm publish`（`prepack` 自动跑门禁；包名 `dsh-chat-embed` 已发布 `0.6.7`）；
+3. 发布：`npm publish`（`prepack` 自动跑门禁；包名 `dsh-chat-embed` 已发布 `0.6.8`）；
 4. 使用者随后只需：`dsh plugin --profile desktop add dsh-chat-embed`。
 
 ## 发布前后检查项
