@@ -429,6 +429,7 @@ async function main() {
       say('  [dry-run] 将执行 npm publish')
     } else {
       run('npm', ['publish'])
+      say('  已提交发布；registry 异步处理，通常 2~4 分钟后才可下载')
     }
   }
 
@@ -471,7 +472,8 @@ async function main() {
 
   step('验证')
   say('  提交        ' + capture('git', ['rev-parse', '--short', 'HEAD']) + '（历史共 ' + capture('git', ['rev-list', '--count', 'HEAD']) + ' 个提交）')
-  say('  npm 可见    ' + ((await publishedOnNpm(version)) ? '是' : '否'))
+  const visible = await publishedOnNpm(version)
+  say('  npm 可见    ' + (visible ? '是' : '尚未——npm 异步处理，实测需 2~4 分钟，用 npm view ' + PKG + '@' + version + ' 确认'))
   const tarball = join(ROOT, 'dist', PKG + '-' + version + '.tgz')
   if (existsSync(tarball)) {
     say('  tarball     dist/' + PKG + '-' + version + '.tgz  sha256 ' + sha256(tarball))
