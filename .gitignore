@@ -1,0 +1,15 @@
+# Dependencies (this plugin ships none)
+node_modules/
+
+# Local tooling output
+*.log
+dist/
+*.tgz
+coverage/
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp

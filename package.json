@@ -1,0 +1,72 @@
+{
+  "name": "dsh-chat-embed",
+  "version": "0.6.7",
+  "author": "poluce <fishsummer@126.com>",
+  "description": "Multi-tab AI chat embed for the DeepSeek Harness desktop app: DeepSeek, 豆包, ChatGPT, MiniMax, Kimi, Gemini and Grok, each signed in separately.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "docs",
+    "tools/shell-patch",
+    "restore-shell-patch.cmd",
+    "清理聊天缓存.cmd",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "scripts": {
+    "check": "node scripts/verify-bundle.mjs && npm test",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "prepack": "npm run check",
+    "pack:dist": "node scripts/pack-dist.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "cordis",
+    "chat",
+    "webview",
+    "embed"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/poluce/dsh-chat-embed.git"
+  },
+  "homepage": "https://github.com/poluce/dsh-chat-embed#readme",
+  "bugs": {
+    "url": "https://github.com/poluce/dsh-chat-embed/issues"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.14.0",
+    "dsh": ">=0.1.0-rc.6"
+  }
+}
