@@ -26,6 +26,15 @@ import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-chat-embed'
 
+/**
+ * Wait for the two Host services before apply runs.
+ *
+ * Without this the loader calls apply while the tree is still assembling, both
+ * looksups below read undefined, and the probe route and the agent tool are
+ * silently skipped — which is exactly what happened until 0.6.10.
+ */
+export const inject = ['webServer', 'tools']
+
 /** Route the panel fetches for the read-only shell probe. */
 const PROBE_PATH = '/dsh-chat-embed/patch-check'
 

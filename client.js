@@ -102,6 +102,18 @@ window.__ModuleLoader__.load({
     let rightDisposers = []
     let openRightTabImpl = () => {}
 
+/**
+ * The context handed to apply().
+ *
+ * The components and helpers live at module scope, so they cannot close over
+ * apply's parameter. Everything that needs a service after apply has returned —
+ * the restart-login action, for one — reads it from here. A re-applied bundle
+ * overwrites it, which is what keeps a hot reload honest.
+ *
+ * @type {any}
+ */
+let activeCtx = undefined
+
     /** Build identity, surfaced in the panel so a packaged app can be diagnosed. */
     const BUILD = '0.6.9'
 
@@ -267,9 +279,10 @@ window.__ModuleLoader__.load({
         persistConfirmNote: 'Continuing opens a new session with the known facts already in the composer — review them and press send.',
         persistConfirmGo: 'Continue',
         persistConfirmCancel: 'Cancel',
+        patchNoWorkspace: 'This composition has no Session service; the patch instructions were copied to the clipboard.',
         patchPromptPlugin: 'Plugin',
         patchPrompt:
-          'Check the DSH desktop shell patch that keeps the embedded chat logins across restarts, and tell me what to do.\n\nKnown so far:\n{facts}\n\nCall the dsh_chat_embed_patch_check tool to confirm the facts, then:\n1. say in a sentence or two what the situation is;\n2. if the patch is missing or was lost, give me the exact command to run;\n3. do not modify any file.',
+          'Check the DSH desktop shell patch that keeps the embedded chat logins across restarts, and tell me what to do.\n\nKnown so far:\n{facts}\n\nCall the dsh_chat_embed_patch_check tool to confirm the facts if it exists, otherwise read the filesystem directly. Then:\n1. say in a sentence or two what the situation is;\n2. if the patch is missing or was lost, give me the exact command to run;\n3. do not modify any file.',
         patchYes: 'yes',
         patchNo: 'no',
         patchPresent: 'present',
@@ -361,9 +374,10 @@ window.__ModuleLoader__.load({
         persistConfirmNote: '点击「继续」会打开一个新会话，把已知信息写进输入框，确认后发送即可。',
         persistConfirmGo: '继续',
         persistConfirmCancel: '取消',
+        patchNoWorkspace: '当前拼装没有会话服务，补丁说明已复制到剪贴板。',
         patchPromptPlugin: '插件',
         patchPrompt:
-          '帮我检查 DSH 桌面版「跨重启保持登录」的补丁状态，并告诉我该做什么。\n\n已知信息：\n{facts}\n\n请先调用 dsh_chat_embed_patch_check 工具核对上面的信息，然后：\n1. 用一两句话说明现在是什么情况；\n2. 如果补丁没打或已失效，给出我可以直接执行的命令；\n3. 不要修改任何文件。',
+          '帮我检查 DSH 桌面版「跨重启保持登录」的补丁状态，并告诉我该做什么。\n\n已知信息：\n{facts}\n\n如果 dsh_chat_embed_patch_check 工具可用，先调用它核对上面的信息；工具不可用就直接检查文件系统。然后：\n1. 用一两句话说明现在是什么情况；\n2. 如果补丁没打或已失效，给出我可以直接执行的命令；\n3. 不要修改任何文件。',
         patchYes: '是',
         patchNo: '否',
         patchPresent: '存在',
@@ -2113,6 +2127,14 @@ window.__ModuleLoader__.load({
             if (method === 'layout') {
               const layout = typeof ctx.get === 'function' ? ctx.get('layout') : undefined
               const out = { service: layout !== undefined && layout !== null, keys: [], hasMain: undefined, activePanelId: undefined, nav: [] }
+              // The patch helper needs this service; report it here so a broken
+              // composition is visible without clicking through the dialog.
+              const workspace = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined
+              out.uiWorkspace = workspace !== undefined && workspace !== null
+              out.uiWorkspaceStartSession = out.uiWorkspace && typeof workspace.startSession === 'function'
+              out.patchCheckRunning = patchCheck.running
+              out.activeCtx = activeCtx !== undefined && activeCtx !== null
+              out.probeLoaded = patchProbe.loaded
               if (out.service) {
                 out.keys = Object.keys(layout)
                 if (typeof layout.hasMainPanel === 'function') {
@@ -2522,15 +2544,25 @@ window.__ModuleLoader__.load({
       try {
         // The Host half serves this route; a relative fetch therefore works in
         // both the desktop app and the Web GUI, under any deployment prefix.
-        const response = await fetch('./dsh-chat-embed/patch-check', {
-          method: 'GET',
-          headers: { accept: 'application/json' },
-          cache: 'no-store',
-        })
+        // Never let a stuck request hold the click hostage: without a timeout the
+        // whole action waits on a route that may not even exist.
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 4000)
+        let response
+        try {
+          response = await fetch('./dsh-chat-embed/patch-check', {
+            method: 'GET',
+            headers: { accept: 'application/json' },
+            cache: 'no-store',
+            signal: controller.signal,
+          })
+        } finally {
+          clearTimeout(timer)
+        }
         patchProbe.value = response.ok ? await response.json() : undefined
       } catch (error) {
         patchProbe.value = undefined
-        void error
+        log('warn', 'probe: the Host route did not answer: ' + messageOf(error))
       }
       patchProbe.loaded = true
       return patchProbe.value
@@ -2549,25 +2581,53 @@ window.__ModuleLoader__.load({
      * @returns {Promise<void>}
      */
     async function openPatchCheckSession(t) {
-      const workspace = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined
-      if (workspace === undefined || workspace === null || typeof workspace.startSession !== 'function') {
-        // No Session service: fall back to the clipboard so the click still does
-        // something useful instead of failing silently.
-        void copyText(patchInstructions(t, patchProbe.value))
-        return
-      }
-      patchCheck.running = true
-      notify()
+      const host = activeCtx
+      // Nothing in here may fail silently: a click that does nothing is
+      // indistinguishable from a broken build, so every step is logged and the
+      // reason comes back to the dialog.
+      let failure = ''
       try {
+        log('info', 'patch-check: entered')
+        const workspace = host !== undefined && typeof host.get === 'function' ? host.get('uiWorkspace') : undefined
+        log(
+          'info',
+          'patch-check: uiWorkspace ' +
+            (workspace === undefined || workspace === null ? 'missing' : 'startSession=' + typeof workspace.startSession),
+        )
+        if (workspace === undefined || workspace === null || typeof workspace.startSession !== 'function') {
+          void copyText(patchInstructions(t, patchProbe.value))
+          failure = t('patchNoWorkspace')
+          return failure
+        }
+        patchCheck.running = true
+        notify()
         const probe = await fetchProbe()
+        log('info', 'patch-check: probe ' + (probe === undefined || probe === null ? 'absent' : 'ok'))
         const prompt = buildPatchPrompt(t, probe)
         patchProbe.loaded = false
-        workspace.startSession(undefined, { prompt, whenDraftExists: 'append' })
+        // A custom main panel stays selected when a Session opens, so the new
+        // Session lands behind this panel and the click looks like a no-op.
+        // Hand the main area back to the conversation first.
+        const layout = host !== undefined && typeof host.get === 'function' ? host.get('layout') : undefined
+        if (layout !== undefined && layout !== null && typeof layout.selectPanel === 'function') {
+          log('info', 'patch-check: releasing the main panel before opening the Session')
+          layout.selectPanel(null)
+        }
+        log('info', 'patch-check: opening a Session with a ' + prompt.length + '-char draft')
+        // 'replace', not 'append': the Workspace blank can already hold a draft
+        // from another flow (the plugin-creation template, for one), and appending
+        // would hand the agent two unrelated instructions at once.
+        workspace.startSession(undefined, { prompt, whenDraftExists: 'replace' })
+        log('info', 'patch-check: startSession returned')
       } catch (error) {
-        void copyText(patchInstructions(t, patchProbe.value) + '\n' + t('copyFailed') + ': ' + messageOf(error))
+        failure = messageOf(error)
+        log('error', 'patch-check: failed', failure)
+        void copyText(patchInstructions(t, patchProbe.value) + '\n' + t('copyFailed') + ': ' + failure)
+      } finally {
+        patchCheck.running = false
+        notify()
       }
-      patchCheck.running = false
-      notify()
+      return failure
     }
 
     /**
@@ -3255,6 +3315,7 @@ window.__ModuleLoader__.load({
       const [barOpen, setBarOpen] = React.useState(false)
       const [menuOpen, setMenuOpen] = React.useState(false)
       const [confirmOpen, setConfirmOpen] = React.useState(false)
+      const [confirmError, setConfirmError] = React.useState('')
 
       /**
        * Close the settings menu.
@@ -3514,6 +3575,7 @@ window.__ModuleLoader__.load({
                     title: t('persistCheckHint'),
                     disabled: patchCheck.running,
                     onClick: () => {
+                        log('info', 'dialog: opened by the restart-login switch')
                       closeMenu()
                       setConfirmOpen(true)
                     },
@@ -3576,6 +3638,7 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'dce-card-title' }, t('persistConfirmTitle')),
                 h('div', { className: 'dce-card-body' }, t('persistRisk')),
                 h('div', { className: 'dce-card-body' }, t('persistConfirmNote')),
+                confirmError === '' ? null : h('div', { className: 'dce-card-detail' }, confirmError),
                 h(
                   'div',
                   { className: 'dce-card-actions' },
@@ -3590,9 +3653,21 @@ window.__ModuleLoader__.load({
                       type: 'button',
                       className: 'dce-button dce-button-primary',
                       'data-persist-confirm': 'true',
+                      disabled: patchCheck.running,
                       onClick: () => {
-                        setConfirmOpen(false)
-                        void openPatchCheckSession(t)
+                        log('info', 'dialog: the confirm button was clicked')
+                        setConfirmError('')
+                        void openPatchCheckSession(t).then(
+                          (failure) => {
+                            if (typeof failure === 'string' && failure !== '') setConfirmError(failure)
+                            else setConfirmOpen(false)
+                          },
+                          (error) => {
+                            const reason = messageOf(error)
+                            log('error', 'dialog: openPatchCheckSession rejected', reason)
+                            setConfirmError(reason)
+                          },
+                        )
                       },
                     },
                     t('persistConfirmGo'),
@@ -3923,6 +3998,7 @@ window.__ModuleLoader__.load({
           }
         }
         if (carrier !== undefined) carrier[INSTANCE_KEY] = { version: BUILD, dispose: disposeAll }
+        activeCtx = ctx
 
         // Locale dictionaries first: the entry label reads them.
         disposers.push(ctx.effect(() => ctx.locale.register(NS, DICTS), 'dsh-chat-embed: dictionaries'))

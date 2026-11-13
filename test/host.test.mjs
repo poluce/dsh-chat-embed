@@ -207,6 +207,15 @@ test('the probe fetches only GET and HEAD, and never writes', () => {
   }
 })
 
+test('the Host half waits for the services it needs', async () => {
+  // The loader calls apply while the tree is still assembling. Without a
+  // declared inject both lookups read undefined and the route and the tool are
+  // skipped without a word — which is how 0.6.9 shipped.
+  const module = await import('../index.js')
+  assert.deepEqual(module.inject, ['webServer', 'tools'], 'both services are declared as dependencies')
+  assert.equal(typeof module.apply, 'function', 'the plugin still exports apply')
+})
+
 test('the patch checker registers one read-only agent tool', async () => {
   const resources = fakeInstall({ 'lib/main.js': PATCHED_MAIN })
   const registered = []
