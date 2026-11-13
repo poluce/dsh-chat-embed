@@ -1506,13 +1506,147 @@ test('the instructions never invent a path the Host did not report', async () =>
   assert.match(text, /shell-patch\.mjs apply/, 'the fallback is still a runnable command')
 })
 
-test('the settings menu keeps no self-check result in its own state', async () => {
+// ---------------------------------------------------------------------------
+// The switch runs the script; the dialog is the fallback
+// ---------------------------------------------------------------------------
+
+/** A fetch stand-in: records every call and answers from `handler`. */
+async function withFetch(handler, body) {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    const target = String(url)
+    calls.push({ url: target, init: init ?? {} })
+    return handler(target)
+  }
+  try {
+    await body(calls)
+  } finally {
+    if (previous === undefined) delete globalThis.fetch
+    else Object.defineProperty(globalThis, 'fetch', previous)
+  }
+}
+
+/** @param {any} value @returns {{ ok: boolean, json: () => Promise<any> }} */
+function jsonAnswer(value) {
+  return { ok: true, status: 200, json: async () => value }
+}
+
+/** The probe the Host answers when it can run the script itself. */
+const PROBE_WITH_ROUTE = {
+  found: true,
+  patched: false,
+  patchSite: true,
+  writable: true,
+  resources: 'C:\\DSH\\resources',
+  script: 'C:\\pkg\\shell-patch.mjs',
+  launcher: 'C:\\pkg\\shell-patch.cmd',
+  applyCommand: '"C:\\pkg\\shell-patch.cmd" apply',
+  revertCommand: '"C:\\pkg\\shell-patch.cmd" revert',
+  token: 'tok-abc',
+}
+
+/** Walk a vnode tree. @param {any} node @param {(props: any) => boolean} predicate @param {any[]} [out] */
+function collectNodes(node, predicate, out = []) {
+  if (node === null || node === undefined || typeof node !== 'object') return out
+  if (node.props !== undefined && predicate(node.props)) out.push(node)
+  const children = Array.isArray(node.children) ? node.children : []
+  for (const child of children) collectNodes(child, predicate, out)
+  return out
+}
+
+test('the switch keeps exactly the state a running action needs', async () => {
   const { internals } = await createInstance()
 
-  // The check lands in a Session, so the menu row only ever holds a running
-  // flag. Nothing about a previous answer can be replayed when it is reopened.
-  assert.deepEqual(Object.keys(internals.patchCheck).sort(), ['running'])
-  assert.equal(internals.patchCheck.running, false)
+  // The switch tracks "an action is in flight" and "a script is waiting for DSH
+  // to exit". Nothing about a previous answer can be replayed from here.
+  assert.deepEqual(Object.keys(internals.patchAction).sort(), ['action', 'pending', 'running'])
+  assert.equal(internals.patchAction.running, false)
+  assert.equal(internals.patchAction.pending, false)
+})
+
+test('the switch starts the script instead of handing over a command', async () => {
+  const instance = await createInstance({ shell: createFakeShell() })
+  attachSurface(instance)
+  const t = (key) => instance.internals.DICTS.zh[key] ?? key
+
+  await withFetch(
+    (url) => jsonAnswer(url.includes('patch-check') ? PROBE_WITH_ROUTE : { ok: true, state: 'started', action: 'apply' }),
+    async (calls) => {
+      const outcome = await instance.internals.startPatchAction(t, 'on')
+
+      assert.equal(outcome.lead, '', 'a started action needs no dialog at all')
+      assert.equal(instance.internals.patchAction.pending, true, 'the panel knows a script is waiting')
+      const asked = calls.filter((call) => call.url.includes('/patch?'))
+      assert.equal(asked.length, 1, 'one request starts it')
+      assert.match(asked[0].url, /action=apply/)
+      assert.match(asked[0].url, /token=tok-abc/, 'the token the probe handed out')
+      assert.equal(asked[0].init.method, 'GET', 'the carrier behind these routes answers GET only')
+    },
+  )
+})
+
+test('an action that cannot start explains itself and still ships the command', async () => {
+  const cases = [
+    ['denied', 'patchNeedsAdmin'],
+    ['noapp', 'patchNoInstall'],
+    ['unsupported', 'patchNoSite'],
+    ['same', 'patchSame'],
+  ]
+  for (const [state, key] of cases) {
+    const instance = await createInstance({ shell: createFakeShell() })
+    attachSurface(instance)
+    const t = (k) => instance.internals.DICTS.zh[k] ?? k
+    await withFetch(
+      (url) => jsonAnswer(url.includes('patch-check') ? PROBE_WITH_ROUTE : { ok: false, state, detail: '' }),
+      async () => {
+        const outcome = await instance.internals.startPatchAction(t, 'on')
+        assert.equal(outcome.lead, t(key), state + ' names its own reason')
+        assert.equal(outcome.script, PROBE_WITH_ROUTE.launcher, 'the dialog still knows what to name')
+        assert.equal(instance.internals.patchAction.pending, false, state + ' claims nothing is waiting')
+      },
+    )
+  }
+})
+
+test('a Host without the action route falls back to the copyable command', async () => {
+  const instance = await createInstance({ shell: createFakeShell() })
+  attachSurface(instance)
+  const t = (key) => instance.internals.DICTS.zh[key] ?? key
+
+  await withFetch(
+    () => jsonAnswer({ found: true, launcher: 'C:\\pkg\\shell-patch.cmd', applyCommand: 'a', revertCommand: 'r' }),
+    async (calls) => {
+      const outcome = await instance.internals.startPatchAction(t, 'on')
+      assert.equal(outcome.lead, t('patchNoRoute'))
+      assert.equal(
+        calls.filter((call) => call.url.includes('/patch?')).length,
+        0,
+        'it never calls a route the Host does not serve',
+      )
+    },
+  )
+})
+
+test('a pending patch asks the user to quit DSH from the tray', async () => {
+  const instance = await createInstance({ shell: createFakeShell() })
+  attachSurface(instance)
+  const surface = () => instance.internals.ChatSurface({ seat: 'main' })
+
+  assert.equal(
+    collectNodes(surface(), (props) => props['data-patch-pending'] === 'true').length,
+    0,
+    'a healthy tab shows no strip',
+  )
+
+  instance.internals.patchAction.pending = true
+  assert.equal(
+    collectNodes(surface(), (props) => props['data-patch-pending'] === 'true').length,
+    1,
+    'the strip appears while the script waits for the exit',
+  )
+  assert.match(instance.internals.DICTS.zh.patchPendingHint, /托盘/, 'zh says where to quit')
+  assert.match(instance.internals.DICTS.en.patchPendingHint, /tray/, 'en says where to quit')
 })
 
 test('one row opens a dialog that hands over the script', async () => {

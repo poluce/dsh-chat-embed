@@ -1,6 +1,6 @@
 {
   "name": "dsh-chat-embed",
-  "version": "0.6.12",
+  "version": "0.6.13",
   "author": "poluce <fishsummer@126.com>",
   "description": "Multi-tab AI chat embed for the DeepSeek Harness desktop app: DeepSeek, 豆包, ChatGPT, MiniMax, Kimi, Gemini and Grok, each signed in separately.",
   "type": "module",

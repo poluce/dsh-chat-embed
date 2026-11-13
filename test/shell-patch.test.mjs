@@ -12,7 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -238,6 +238,110 @@ test('a malformed archive is reported, not thrown', () => {
   const { code, out } = run(['status', '--resources', dir])
   assert.notEqual(code, 0)
   assert.doesNotMatch(out, /at .*\\n\s+at /, 'no stack trace is dumped at the user')
+})
+
+// ---------------------------------------------------------------------------
+// --restart: the switch's path — wait for DSH to exit, swap, open it again
+// ---------------------------------------------------------------------------
+
+/**
+ * A stand-in for DSH: a process that exits after `ms`.
+ *
+ * The script watches it with `signal 0`, so any real process behaves the same;
+ * node keeps the test free of platform-specific binaries.
+ *
+ * @param {number} ms
+ * @returns {import('node:child_process').ChildProcess}
+ */
+function fakeApp(ms) {
+  const child = spawn(process.execPath, ['-e', `setTimeout(() => process.exit(0), ${String(ms)})`], {
+    stdio: 'ignore',
+  })
+  child.unref()
+  return child
+}
+
+test('--restart waits for the app to exit, then swaps and reopens it', () => {
+  const dir = install(buildAsar(ENTRIES))
+  const original = readFileSync(join(dir, 'app.asar'))
+  const app = fakeApp(700)
+
+  const { code, out } = run([
+    'apply',
+    '--resources',
+    dir,
+    '--yes',
+    '--restart',
+    '--pid',
+    String(app.pid),
+    // `node` with no arguments and a closed stdin starts a REPL and exits at
+    // once: a portable "program that runs" for the relaunch branch.
+    '--exe',
+    process.execPath,
+  ])
+  assert.equal(code, 0)
+  assert.match(out, /DSH 已退出/, 'it waited for the process instead of retrying the rename')
+  assert.match(out, /已重新打开 DSH/)
+  assert.match(out, /完成，DSH 已重新打开/)
+  assert.notEqual(hashOf(readFileSync(join(dir, 'app.asar'))), hashOf(original), 'the swap came after the exit')
+  assert.equal(existsSync(join(dir, 'app.asar.new')), false, 'no staged file is left behind')
+})
+
+test('--restart gives up rather than patching a DSH that never exits', () => {
+  const dir = install(buildAsar(ENTRIES))
+  const before = archiveHash(dir)
+  const app = fakeApp(30000)
+  try {
+    const { code, out } = run([
+      'apply',
+      '--resources',
+      dir,
+      '--yes',
+      '--restart',
+      '--pid',
+      String(app.pid),
+      '--wait-minutes',
+      '0.01',
+    ])
+    assert.notEqual(code, 0, 'a timeout is a failure, not a silent patch')
+    assert.match(out, /还没退出/)
+    assert.equal(archiveHash(dir), before, 'the archive was not touched')
+    assert.equal(existsSync(join(dir, 'app.asar.new')), false, 'the staged copy was dropped')
+  } finally {
+    app.kill()
+  }
+})
+
+test('--restart without --exe asks the user to reopen DSH itself', () => {
+  const dir = install(buildAsar(ENTRIES))
+  const app = fakeApp(300)
+
+  const { code, out } = run(['apply', '--resources', dir, '--yes', '--restart', '--pid', String(app.pid)])
+  assert.equal(code, 0)
+  assert.match(out, /请自己打开 DSH/)
+  assert.doesNotMatch(out, /已重新打开 DSH/, 'it never claims a relaunch it did not do')
+})
+
+test('a relaunch that cannot start says so and keeps the swap', () => {
+  const dir = install(buildAsar(ENTRIES))
+  const original = readFileSync(join(dir, 'app.asar'))
+  const app = fakeApp(300)
+
+  const { code, out } = run([
+    'apply',
+    '--resources',
+    dir,
+    '--yes',
+    '--restart',
+    '--pid',
+    String(app.pid),
+    '--exe',
+    join(dir, 'not-a-program-at-all.exe'),
+  ])
+  assert.equal(code, 0, 'the patch landed; only the relaunch failed')
+  assert.match(out, /没能自动打开 DSH/)
+  assert.match(out, /请重新打开 DSH/, 'the closing line falls back to the prompt')
+  assert.notEqual(hashOf(readFileSync(join(dir, 'app.asar'))), hashOf(original))
 })
 
 test('the launchers exist and are the ones the Host reports', () => {

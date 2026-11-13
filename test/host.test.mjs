@@ -206,24 +206,76 @@ test('the probe names a missing install instead of failing', () => {
   assert.ok(typeof report.detail === 'string' && report.detail.length > 0)
 })
 
-test('the probe fetches only GET and HEAD, and never writes', () => {
-  const resources = fakeInstall({ 'lib/main.js': PATCHED_MAIN })
-  const previous = process.env.DSH_RESOURCES
-  process.env.DSH_RESOURCES = resources
-  try {
-    const mounted = []
-    const ctx = {
+// ---------------------------------------------------------------------------
+// The two routes: a read-only probe, and the action the switch asks for
+// ---------------------------------------------------------------------------
+
+/** A Context whose webServer records what the plugin registers. @returns {{ mounted: any[], ctx: any }} */
+function routeContext() {
+  const mounted = []
+  return {
+    mounted,
+    ctx: {
       get: (name) => (name === 'webServer' ? { register: (route) => (mounted.push(route), () => {}) } : undefined),
       effect: (callback) => {
         const dispose = callback()
         return typeof dispose === 'function' ? dispose : () => {}
       },
-    }
+    },
+  }
+}
+
+/** @param {any[]} mounted @param {string} path @returns {any} */
+function routeAt(mounted, path) {
+  return mounted.find((route) => route.path === path)
+}
+
+/** @param {string} query @returns {Request} */
+function actionRequest(query) {
+  return new Request('http://127.0.0.1' + internals.PATCH_PATH + '?' + query, { method: 'GET' })
+}
+
+/** A probe report that says "an unpatched shell I could patch". @param {object} [over] */
+function patchable(over = {}) {
+  return {
+    found: true,
+    patched: false,
+    cachePatch: false,
+    patchSite: true,
+    writable: true,
+    resources: 'C:\\DSH\\resources',
+    asar: 'C:\\DSH\\resources\\app.asar',
+    script: 'C:\\plugin\\tools\\shell-patch\\shell-patch.mjs',
+    launcher: 'C:\\plugin\\tools\\shell-patch\\shell-patch.cmd',
+    applyCommand: 'shell-patch.cmd apply',
+    revertCommand: 'shell-patch.cmd revert',
+    detail: '',
+    ...over,
+  }
+}
+
+/** A child-process stand-in: `unref` is required, `kill` is recorded. @returns {any} */
+function fakeChild() {
+  return {
+    killed: false,
+    unref() {},
+    kill() {
+      this.killed = true
+    },
+  }
+}
+
+test('the probe answers GET and HEAD and nothing else, and writes nothing', () => {
+  const resources = fakeInstall({ 'lib/main.js': PATCHED_MAIN })
+  const previous = process.env.DSH_RESOURCES
+  process.env.DSH_RESOURCES = resources
+  try {
+    const { mounted, ctx } = routeContext()
     apply(ctx)
 
-    assert.equal(mounted.length, 1, 'one route is registered')
-    const route = mounted[0]
-    assert.equal(route.path, internals.PROBE_PATH)
+    assert.equal(mounted.length, 2, 'the probe and the action route are both registered')
+    const route = routeAt(mounted, internals.PROBE_PATH)
+    assert.ok(route !== undefined, 'the probe keeps its path')
     assert.equal(route.kind, 'exact')
 
     const body = route.resource(new Request('http://127.0.0.1' + route.path, { method: 'GET' }), undefined)
@@ -237,6 +289,142 @@ test('the probe fetches only GET and HEAD, and never writes', () => {
     if (previous === undefined) delete process.env.DSH_RESOURCES
     else process.env.DSH_RESOURCES = previous
   }
+})
+
+test('the probe hands out the token the action route demands', async () => {
+  const { mounted, ctx } = routeContext()
+  internals.installHttpRoutes(ctx, { inspect: () => patchable(), spawn: () => fakeChild() })
+  const probe = routeAt(mounted, internals.PROBE_PATH)
+  const body = await probe.resource(new Request('http://127.0.0.1' + internals.PROBE_PATH), undefined).json()
+  assert.equal(body.token, internals.PATCH_TOKEN, 'the panel learns the token from the probe')
+
+  const action = routeAt(mounted, internals.PATCH_PATH)
+  const refused = action.resource(actionRequest('action=apply'), undefined)
+  assert.equal(refused.status, 403, 'no token, no action')
+  assert.equal(action.resource(actionRequest('action=apply&token=wrong'), undefined).status, 403)
+})
+
+test('the action route refuses a bad action and a non-GET method', () => {
+  const { mounted, ctx } = routeContext()
+  const spawned = []
+  internals.installHttpRoutes(ctx, { inspect: () => patchable(), spawn: (...args) => (spawned.push(args), fakeChild()) })
+  const action = routeAt(mounted, internals.PATCH_PATH)
+
+  const post = action.resource(
+    new Request('http://127.0.0.1' + internals.PATCH_PATH + '?action=apply&token=' + internals.PATCH_TOKEN, {
+      method: 'POST',
+    }),
+    undefined,
+  )
+  assert.equal(post.status, 405, 'the carrier has no request body to speak of')
+  assert.equal(post.headers.get('allow'), 'GET')
+
+  const bad = action.resource(actionRequest('action=reboot&token=' + internals.PATCH_TOKEN), undefined)
+  assert.equal(bad.status, 400)
+  assert.equal(spawned.length, 0, 'nothing was started')
+})
+
+test('an action that cannot run comes back with a reason and a command', async () => {
+  const cases = [
+    [{ found: false }, 'noapp'],
+    [{ patched: true }, 'same'],
+    [{ patchSite: false }, 'unsupported'],
+    [{ writable: false }, 'denied'],
+    [{ script: undefined }, 'failed'],
+  ]
+  for (const [over, state] of cases) {
+    const { mounted, ctx } = routeContext()
+    let starts = 0
+    internals.installHttpRoutes(ctx, {
+      inspect: () => patchable(over),
+      spawn: () => {
+        starts += 1
+        return fakeChild()
+      },
+    })
+    const action = routeAt(mounted, internals.PATCH_PATH)
+    const response = action.resource(actionRequest('action=apply&token=' + internals.PATCH_TOKEN), undefined)
+    const body = await response.json()
+    assert.equal(body.ok, false, state + ' does not claim success')
+    assert.equal(body.state, state)
+    assert.equal(starts, 0, state + ' starts nothing')
+  }
+})
+
+test('a started action runs the script with the shell as the process to wait for', async () => {
+  const { mounted, ctx } = routeContext()
+  const calls = []
+  internals.installHttpRoutes(ctx, {
+    inspect: () => patchable(),
+    spawn: (...args) => {
+      calls.push(args)
+      return fakeChild()
+    },
+  })
+  const action = routeAt(mounted, internals.PATCH_PATH)
+  const body = await action.resource(actionRequest('action=apply&token=' + internals.PATCH_TOKEN), undefined).json()
+
+  assert.equal(body.ok, true)
+  assert.equal(body.state, 'started')
+  assert.equal(body.action, 'apply')
+  assert.equal(calls.length, 1, 'exactly one child')
+
+  const [file, args, options] = calls[0]
+  assert.ok(typeof file === 'string' && file.length > 0, 'something runs the script')
+  assert.deepEqual(args.slice(0, 5), [patchable().script, 'apply', '--restart', '--resources', patchable().resources])
+  const pidAt = args.indexOf('--pid')
+  assert.ok(pidAt !== -1, 'the script waits for the shell, not for a retry loop')
+  assert.equal(args[pidAt + 1], String(process.ppid))
+  assert.equal(args.indexOf('--exe'), -1, 'a plain Node Host is nothing to relaunch')
+
+  assert.equal(options.detached, true, 'it must outlive the Host')
+  assert.equal(options.stdio, 'ignore')
+  assert.equal(options.env.ELECTRON_RUN_AS_NODE, '1', 'the Hosts own runtime runs the script as Node')
+})
+
+test('a second click replaces the waiting patcher instead of piling them up', () => {
+  const { mounted, ctx } = routeContext()
+  const children = []
+  internals.installHttpRoutes(ctx, {
+    inspect: () => patchable(),
+    spawn: () => {
+      const child = fakeChild()
+      children.push(child)
+      return child
+    },
+  })
+  const action = routeAt(mounted, internals.PATCH_PATH)
+  action.resource(actionRequest('action=apply&token=' + internals.PATCH_TOKEN), undefined)
+  action.resource(actionRequest('action=apply&token=' + internals.PATCH_TOKEN), undefined)
+
+  assert.equal(children.length, 2)
+  assert.equal(children[0].killed, true, 'the first one is stopped')
+  assert.equal(children[1].killed, false)
+})
+
+test('a spawn that throws is reported, not swallowed', async () => {
+  const { mounted, ctx } = routeContext()
+  internals.installHttpRoutes(ctx, {
+    inspect: () => patchable(),
+    spawn: () => {
+      throw new Error('spawn nope')
+    },
+  })
+  const action = routeAt(mounted, internals.PATCH_PATH)
+  const body = await action.resource(actionRequest('action=apply&token=' + internals.PATCH_TOKEN), undefined).json()
+  assert.equal(body.ok, false)
+  assert.equal(body.state, 'failed')
+  assert.match(body.detail, /spawn nope/)
+})
+
+test('unloading the bundle stops a patcher it started', () => {
+  const { mounted, ctx } = routeContext()
+  const child = fakeChild()
+  const dispose = internals.installHttpRoutes(ctx, { inspect: () => patchable(), spawn: () => child })
+  routeAt(mounted, internals.PATCH_PATH).resource(actionRequest('action=apply&token=' + internals.PATCH_TOKEN), undefined)
+  assert.equal(child.killed, false)
+  dispose()
+  assert.equal(child.killed, true, 'a removed plugin leaves nothing behind')
 })
 
 test('the Host half waits for the service it needs', async () => {

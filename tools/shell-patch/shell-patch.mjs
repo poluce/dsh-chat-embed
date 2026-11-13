@@ -23,18 +23,46 @@
  *                       (default: $DSH_RESOURCES, then the usual locations)
  *   --yes               answer every question with yes
  *   --no-cache-patch    keep the disk cache; only the partition goes persistent
+ *   --restart           wait for DSH to exit, swap, then start it again
+ *   --pid <n>           the DSH process --restart waits for
+ *   --exe <path>        what --restart starts again once the swap is in
+ *   --wait-minutes <n>  how long --restart may wait for that exit (0 = forever)
  *
  * Safety: the new archive is rebuilt from the old one's own bytes, every
  * untouched entry must come out byte-identical, and only then is it swapped in.
  * The previous archive is kept. Running the same command twice is harmless.
  */
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import * as nodeFs from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+/**
+ * The file system this script actually needs.
+ *
+ * Electron's `node:fs` treats any `*.asar` path as an archive: reading the
+ * archive file itself raises ENOENT, `statSync` reports 0, `existsSync` says
+ * false and a write is refused with "Invalid package". This script exists to
+ * read and rewrite exactly that file, and the panel starts it with the desktop
+ * app's own runtime, so under Electron it must use the unpatched binding.
+ * `original-fs` is that binding; a plain Node has no such module and is already
+ * literal, so the ordinary one is used there.
+ */
+const fs = (() => {
+  try {
+    const original = createRequire(import.meta.url)('original-fs')
+    if (original !== undefined && original !== null && typeof original.readFileSync === 'function') return original
+  } catch (error) {
+    void error
+  }
+  return nodeFs
+})()
+
+const { existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } = fs
 
 // ---------------------------------------------------------------------------
 // The patch: two literal rewrites, each inverted by `revert`
@@ -61,6 +89,8 @@ const isTty = process.stdout.isTTY === true
 
 /** Set when a command actually replaced app.asar, so a no-op never says "restart". */
 let changed = false
+/** Set when the same run also started DSH again, so the last line can say so. */
+let reopened = false
 
 // ---------------------------------------------------------------------------
 // Output
@@ -418,6 +448,138 @@ async function swapIn(archive, staged, keepAs) {
 }
 
 // ---------------------------------------------------------------------------
+// Handing off: wait for DSH to exit, swap, start it again
+// ---------------------------------------------------------------------------
+
+/** Drop the archive a `--restart` run staged but never swapped in. @param {string} staged */
+function discardStaged(staged) {
+  try {
+    unlinkSync(staged)
+  } catch (error) {
+    void error
+  }
+}
+
+/**
+ * Whether a process is still there.
+ *
+ * `signal 0` asks the OS and changes nothing; EPERM means "it exists, it is
+ * just not yours", and anything else means it is gone.
+ *
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    const code =
+      error !== null && error !== undefined && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+    return code === 'EPERM'
+  }
+}
+
+/**
+ * Ask the user to quit DSH, and wait for it.
+ *
+ * The caller has staged the new archive but has not touched the old one yet: a
+ * running DSH keeps app.asar mapped, and on Windows a mapped file cannot be
+ * renamed. Nothing else in this script can free it — the shell's close button
+ * only hides the window, its quit path is a menu item behind a confirmation,
+ * and a plugin has no way to ask for either. So the user quits, this waits, and
+ * the rest happens without them.
+ *
+ * Without a pid there is nothing to watch: the swap keeps its own retry loop as
+ * the wait, so this returns immediately.
+ *
+ * @param {{ pid: number | undefined, exe: string | undefined, waitMinutes: number }} options
+ * @returns {Promise<boolean>} false when the wait ran out
+ */
+async function waitForQuit(options) {
+  say('')
+  say('  补丁已准备好，接下来要替换 app.asar。')
+  say('  这个文件被运行中的 DSH 占着，请先把它关掉：')
+  say('    右键任务栏托盘里的 DSH 图标 →「退出」')
+  say(
+    options.exe === undefined
+      ? '  退出后我会替换文件；替换完请自己打开 DSH。'
+      : '  退出后我会替换文件，并自动重新打开 DSH。',
+  )
+  const pid = options.pid
+  if (pid === undefined) return true
+
+  const minutes = Number.isFinite(options.waitMinutes) ? options.waitMinutes : 0
+  const deadline = minutes > 0 ? Date.now() + minutes * 60000 : 0
+  say('')
+  let waited = 0
+  while (isRunning(pid)) {
+    if (deadline !== 0 && Date.now() > deadline) {
+      say('  ✗ 等了 ' + minutes + ' 分钟，DSH 还没退出。')
+      say('    未改动任何文件。要继续就再运行一次。')
+      return false
+    }
+    await delay(500)
+    waited += 500
+    if (waited % 12000 === 0) say('  仍在等待 DSH 退出 …')
+  }
+  say('  ✓ DSH 已退出，正在替换 …')
+  return true
+}
+
+/**
+ * The `.app` bundle that contains an executable, for `open` on macOS.
+ *
+ * @param {string} exe
+ * @returns {string | undefined}
+ */
+function appBundleOf(exe) {
+  const at = exe.lastIndexOf('.app' + sep)
+  return at === -1 ? undefined : exe.slice(0, at + '.app'.length)
+}
+
+/**
+ * Start DSH again after a `--restart` swap.
+ *
+ * The old instance has already exited when this runs, so the shell's
+ * single-instance lock cannot swallow the launch and leave a hidden window.
+ *
+ * @param {{ exe: string | undefined }} options
+ */
+async function relaunchApp(options) {
+  const exe = options.exe
+  if (exe === undefined) return
+  const bundle = process.platform === 'darwin' ? appBundleOf(exe) : undefined
+  say('  正在重新打开 DSH …')
+  let failure = ''
+  try {
+    const child =
+      bundle === undefined
+        ? spawn(exe, [], { detached: true, stdio: 'ignore' })
+        : spawn('/usr/bin/open', [bundle], { detached: true, stdio: 'ignore' })
+    if (typeof child.unref === 'function') child.unref()
+    // A missing program fails asynchronously; without this listener Node would
+    // die on the unhandled error and the user would never learn why.
+    const started = await new Promise((done) => {
+      child.once('spawn', () => done(true))
+      child.once('error', (error) => {
+        failure = reasonOf(error)
+        done(false)
+      })
+    })
+    if (started !== true) throw new Error(failure === '' ? '没能启动' : failure)
+    // Give the launcher a moment to take the process over before we exit.
+    await delay(400)
+    reopened = true
+    say('  ✓ 已重新打开 DSH。')
+  } catch (error) {
+    say('  · 没能自动打开 DSH：' + reasonOf(error))
+    say('    请手动打开它。')
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
@@ -442,7 +604,7 @@ function status(resources) {
 
 /**
  * @param {string} resources
- * @param {{ cachePatch: boolean }} options
+ * @param {{ cachePatch: boolean, restart?: boolean, pid?: number, exe?: string, waitMinutes?: number }} options
  */
 async function apply(resources, options) {
   const state = inspect(resources)
@@ -467,19 +629,26 @@ async function apply(resources, options) {
   const staged = join(resources, STAGED)
   writeFileSync(staged, built.buffer)
 
+  if (options.restart === true && !(await waitForQuit(options))) {
+    discardStaged(staged)
+    return 1
+  }
+
   // Park a pristine copy the first time. A backup that is itself patched is
   // worthless as a restore point, so it never gets to overwrite a clean one.
   const keep = backupState(resources) === 'clean' ? undefined : join(resources, BACKUP)
   await swapIn(state.archive, staged, keep)
   if (keep !== undefined) say('  ✓ 原版已留作 ' + BACKUP)
   changed = true
+  if (options.restart === true) await relaunchApp(options)
   return 0
 }
 
 /**
  * @param {string} resources
+ * @param {{ restart?: boolean, pid?: number, exe?: string, waitMinutes?: number }} [options]
  */
-async function revert(resources) {
+async function revert(resources, options = {}) {
   const state = inspect(resources)
   if (!state.patched) {
     say('  本来就没打补丁，无需还原。')
@@ -518,9 +687,14 @@ async function revert(resources) {
 
   const staged = join(resources, STAGED)
   writeFileSync(staged, built.buffer)
+  if (options.restart === true && !(await waitForQuit(options))) {
+    discardStaged(staged)
+    return 1
+  }
   await swapIn(state.archive, staged, join(resources, PATCHED_COPY))
   say('  ✓ 补丁版已留作 ' + PATCHED_COPY)
   changed = true
+  if (options.restart === true) await relaunchApp(options)
   return 0
 }
 
@@ -670,7 +844,18 @@ function relaunchElevated(argv) {
 
 /** @param {string[]} argv */
 function parseArgs(argv) {
-  const options = { action: 'menu', resources: undefined, yes: false, cachePatch: true, elevated: false, help: false }
+  const options = {
+    action: 'menu',
+    resources: undefined,
+    yes: false,
+    cachePatch: true,
+    elevated: false,
+    help: false,
+    restart: false,
+    pid: undefined,
+    exe: undefined,
+    waitMinutes: 10,
+  }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === 'apply' || arg === 'on') options.action = 'apply'
@@ -681,6 +866,10 @@ function parseArgs(argv) {
     else if (arg === '--yes' || arg === '-y') options.yes = true
     else if (arg === '--no-cache-patch') options.cachePatch = false
     else if (arg === '--elevated') options.elevated = true
+    else if (arg === '--restart') options.restart = true
+    else if (arg === '--pid') options.pid = Number(argv[++index])
+    else if (arg === '--exe') options.exe = argv[++index]
+    else if (arg === '--wait-minutes') options.waitMinutes = Number(argv[++index])
     else if (arg === '--help' || arg === '-h') options.help = true
     else {
       console.error('unknown argument: ' + arg)
@@ -705,6 +894,10 @@ function usage() {
   say('    --resources <dir>  指定含 app.asar 的安装目录')
   say('    --yes              不询问，直接执行')
   say('    --no-cache-patch   保留磁盘缓存，只让分区持久')
+  say('    --restart          等 DSH 退出后再替换，并重新打开它')
+  say('    --pid <n>          --restart 等待的 DSH 进程')
+  say('    --exe <path>       --restart 完成后要重新打开的程序')
+  say('    --wait-minutes <n> --restart 最多等多久退出（0 = 一直等，默认 10）')
   say('')
   say('  改完请重新打开 DSH 使其生效。')
   say('')
@@ -821,7 +1014,7 @@ async function main() {
   if (code === 0 && changed) {
     say('')
     say('  ──────────────────────────────────────')
-    say('  ✓ 完成。请重新打开 DSH 使其生效。')
+    say(reopened ? '  ✓ 完成，DSH 已重新打开。' : '  ✓ 完成。请重新打开 DSH 使其生效。')
     say('  ──────────────────────────────────────')
   }
   say('')

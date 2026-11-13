@@ -129,7 +129,7 @@ dsh plugin --profile desktop add link:<本仓库克隆路径>
 | 页面卡住/白屏 | 工具行「重新加载」（换新租约）或「外开」到系统浏览器 |
 | 排查问题 | 工具行「⚙」→「标签页诊断…」→ 看地址 / 分区 / 状态 / 席位 / 自检，点「复制诊断信息」发给维护者 |
 | 打开调试日志 | 工具行「⚙」→「调试日志」开关（默认关闭）；开启后控制台输出插件事件，「复制日志」导出最近 200 条 |
-| 查看跨重启登录 | 工具行「⚙」→「跨重启保持登录」一行显示 已开启（persist: 分区）/ 未开启（内存分区）/ 尚未检测；未开启时可点「复制补丁说明」 |
+| 开启跨重启登录 | 工具行「⚙」→ 点「重启保持登录」开关：插件自己启动补丁脚本，面板提示你从托盘退出 DSH，退出后自动替换并重开；自动执行不可用时才弹出可复制的命令 |
 | 换到另一处显示 | 直接点另一处的入口（左栏图标或右栏 tab），聊天会接管过去并回到上次会话 |
 
 **登录**：每个服务在自己的 webview 里用站点自己的方式登录（验证码/扫码/邮箱）。登录态在同一次运行内有效；跨重启需要打桌面壳补丁（见 [已知限制](#已知限制)）。
@@ -167,7 +167,15 @@ dsh plugin --profile desktop add link:<本仓库克隆路径>
 
 ### 桌面壳补丁（可选，跨重启免登录）
 
-**双击一个脚本就行，不需要 agent，也不需要装 Node。**
+**点一下开关就行：脚本由插件自己启动，不用复制命令、不用 agent、不用装 Node。**
+
+1. 齿轮 → 「重启保持登录」开关点一下；
+2. 面板底部出现一行：**请从托盘退出 DSH**（右键托盘图标 →「退出」）；
+3. 退出后脚本替换 `app.asar`，然后**自动重新打开 DSH**；回来时开关已是「已开启」。
+
+补丁要替换的 `app.asar` 被运行中的 DSH 映射着，Windows 上改名必然失败，所以那一次退出必须由你来做——壳没有给插件（也没有给任何外部进程）留退出的接口：窗口的关闭按钮只是收进托盘，真正的退出在抽屉菜单里并带确认。除了这一步，全程自动。
+
+脚本也可以直接双击，走同一个入口：
 
 | 平台 | 双击 |
 | --- | --- |
@@ -194,6 +202,7 @@ node tools/shell-patch/shell-patch.mjs apply     # 开启
 node tools/shell-patch/shell-patch.mjs revert    # 关闭
 node tools/shell-patch/shell-patch.mjs cache     # 清缓存
 node tools/shell-patch/shell-patch.mjs apply --resources "D:\DeepSeek Harness\resources"
+node tools/shell-patch/shell-patch.mjs apply --restart --pid <DSH 的 PID> --exe "<DSH.exe>"   # 开关走的就是这条
 ```
 
 > 通过 npm 安装时脚本位于 `<profile>/node_modules/<包名>/tools/shell-patch/`；设置菜单里的开关也会告诉你它的确切位置。
@@ -211,7 +220,7 @@ node tools/shell-patch/shell-patch.mjs apply --resources "D:\DeepSeek Harness\re
 - **命令幂等**：已经是目标状态就只报告，不重复改；
 - **关闭不依赖备份文件**：`revert` 把两处改写**反向写回去**，所以即使 `app.asar.orig` 已经被弄脏（旧版本就踩过这个坑）也能还原成原版；
 - **干净备份才留**：已存在的干净 `app.asar.orig` 不会被补丁版覆盖——这正是旧版本「点了关闭其实没关掉」的原因；
-- **DSH 在跑就等**：Windows 上运行中的 `app.asar` 被内存映射占用，脚本原地提示你退出 DSH，退出后自动继续（macOS 上改名当场成功，下次启动生效）；
+- **DSH 在跑就等**：Windows 上运行中的 `app.asar` 被内存映射占用，脚本提示你退出 DSH，退出后自动继续并重新打开它（`--wait-minutes` 限时，超时**一个字节都不改**并删掉暂存文件）；
 - **需要提权会自动请求**：安装目录不可写时 Windows 弹 UAC、macOS 弹管理员授权，不用自己开管理员终端再敲一遍。
 
 ### 补丁状态
@@ -222,12 +231,12 @@ node tools/shell-patch/shell-patch.mjs apply --resources "D:\DeepSeek Harness\re
 | --- | --- |
 | 已开启（`persist:` 分区） | 补丁生效，重启后仍登录 |
 | 未开启（内存分区） | 没打过补丁 |
-| **已失效**（升级覆盖） | 打过补丁，但桌面壳升级覆盖了 `app.asar`，重跑一次即可 |
+| **已失效**（升级覆盖） | 打过补丁，但桌面壳升级覆盖了 `app.asar`，再点一次开关即可 |
 | 尚未检测 | 还没打开过聊天页 |
 
-点开关会弹一个确认框，里面写着**该双击哪个脚本**；点「复制命令」把脚本路径和命令一起复制走。
+开关直接执行：Host 端 `GET /dsh-chat-embed/patch`（带探针发的 token）会启动脚本，脚本等 DSH 退出、替换文件、再把 DSH 打开。**只有自动执行不可用时**（安装目录要管理员权限、壳改了分区写法、找不到安装目录、Host 版本还没有这条路由）才会弹出确认框，里面给出该双击哪个脚本和可复制的命令。
 
-背后是 Host 侧只读探针 `GET /dsh-chat-embed/patch-check`：安装目录、`app.asar` 是否可写、是否已打补丁、补丁点是否还在（壳版本是否兼容）、备份**是否干净**、脚本与启动器的绝对路径、开启与关闭两条命令。它只读，不写任何文件。
+背后是 Host 侧只读探针 `GET /dsh-chat-embed/patch-check`：安装目录、`app.asar` 是否可写、是否已打补丁、补丁点是否还在（壳版本是否兼容）、备份**是否干净**、脚本与启动器的绝对路径、开启与关闭两条命令，以及开关要用的 token。它只读，不写任何文件。
 
 ### 界面语言
 
@@ -245,7 +254,7 @@ node tools/shell-patch/shell-patch.mjs apply --resources "D:\DeepSeek Harness\re
 dsh-chat-embed/
 ├── package.json               # 包名/版本、dsh.bundle.patch、dsh.client、exports/files
 ├── cordis.patch.yml           # 组合补丁：插入 id=chat-embed 的 loader 行
-├── index.js                   # Host 半侧：补丁探针（只读 HTTP 路由）
+├── index.js                   # Host 半侧：补丁探针（只读）+ 开关用的执行路由
 ├── client.js                  # Client 半侧（约 3985 行，手写产物）
 ├── locale/{en,zh}.json        # 插件管理器显示用 meta
 ├── icon.svg                   # 插件图标（插件管理器显示）
@@ -323,7 +332,7 @@ node scripts/release.mjs 0.6.7 --summary "..." --dry-run   # 只看计划
 
 ## 已知限制
 
-1. **跨重启登录需要壳补丁**：壳默认给内存分区（`dsh-sidebar-browser-<uuid>`，无 `persist:`，每次启动随机），登录态不落盘。`tools/shell-patch/` 可修；客户端升级会覆盖 `app.asar`，需要重打——菜单里的「检查补丁配置」会告诉你现在是哪种情况、命令是什么。
+1. **跨重启登录需要壳补丁**：壳默认给内存分区（`dsh-sidebar-browser-<uuid>`，无 `persist:`，每次启动随机），登录态不落盘。`tools/shell-patch/` 可修；客户端升级会覆盖 `app.asar`，需要重打——菜单里的「重启保持登录」开关会告诉你现在是哪种情况，点一下就能重打。
 2. **左右互斥**：右栏聊天依赖会话视图；中央打开聊天面板时右栏不可用。同一时刻只有一处显示聊天页，切换会重建一次（自动回到上次会话，不用重新登录）。
 3. **中心面板会被切走**：选另一个主面板时中央聊天页随 DOM 卸载，回来要重建；右栏 tab 带 `keepMounted`，切标签/切会话不卸载。
 4. **内存**：每点亮一个标签 = 一个渲染进程；7 个全开会明显吃内存。
@@ -343,7 +352,7 @@ node scripts/release.mjs 0.6.7 --summary "..." --dry-run   # 只看计划
 | 标签变红（`data-failed`） | 该标签租约或导航失败：点它看状态行 `detail`，再「重新加载」 |
 | 显示「已连接」但页面空白 | 网络或站点风控；「重新加载」或「外开」 |
 | 出现「使用环境异常」 | UA 归一化失效（壳升级后 UA 结构变了），查 `normalizedUserAgent` |
-| 重启后要重新登录 | 未打壳补丁，或补丁被客户端升级覆盖：双击 `tools/shell-patch/shell-patch.cmd` 选「1) 开启」 |
+| 重启后要重新登录 | 未打壳补丁，或补丁被客户端升级覆盖：把设置菜单里的「重启保持登录」开关点一下，然后按提示从托盘退出 DSH（也可双击 `tools/shell-patch/shell-patch.cmd` 选「1) 开启」） |
 | 磁盘占用变大 | 双击同一个脚本选「4) 清理缓存」（只删缓存，保留登录）；或确认补丁含 `cache:false` |
 | 标签文字/顺序要改 | 只改 `PROVIDERS`，`npm run check` + 重装 |
 
@@ -353,6 +362,7 @@ node scripts/release.mjs 0.6.7 --summary "..." --dry-run   # 只看计划
 
 | 版本 | 变化 |
 | --- | --- |
+| `0.6.13` | 「重启保持登录」开关直接执行：Host 新增 `GET /dsh-chat-embed/patch`（探针发的 token 鉴权）启动补丁脚本，脚本用 `--restart` 等 DSH 退出、替换 `app.asar`、再自动打开 DSH；确认框降级为「自动执行不可用时」的兜底。脚本与 Host 读取 `app.asar` 一律走 `original-fs`——Electron 的 `node:fs` 会把 `.asar` 当压缩包（读出 ENOENT、`stat` 归零、写入报 Invalid package），此前探针在桌面版里会误报「没有安装目录」 |
 | `0.6.12` | 修掉同一页面每次挂载加载两三次的问题：navigateGuest 每 350ms 重发 location.href，而 getURL() 在提交前一直是 about:blank，第二次赋值取消了正在进行的加载；改为加载中只等不重发，上限从 5 次尝试改为 20 秒期限（慢站点以前会直接判定失败）。另加 guest mounted / guest dropped 诊断日志 |
 | `0.6.11` | 补丁前的可写性判断从「不要尝试写入」改为「先执行，真被系统拒绝再给提权命令」：access(W_OK) 在 Windows 上可能误判，不该据此跳过尝试；并说明 DSH 授权弹窗与 Windows 提权是两条不同的闸 |
 | `0.6.10` | 修好「重启保持登录」整条链路：开关不再因 ctx 作用域错误静默失败、变成可双向切换（开启/还原）、设置菜单两行合一、预填任务说明重写；Host 半补上 inject 依赖，探针路由与 agent 工具终于生效 |

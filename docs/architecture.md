@@ -135,7 +135,7 @@ this.configureSession(session.fromPartition(partition, { cache: false }))
 
 > 补丁丢失时插件行为不变，只是回到"每次重启重新登录"。
 >
-> 插件侧只能**检测**补丁是否存在：guest 拿到的分区以 `persist:` 开头即已开启，否则是内存分区；结果记进 `localStorage['dsh-chat-embed:persist']`，设置菜单在重启后立即显示该状态。壳在 `acquire(workspace)` 里只接收 workspace，分区名由主进程决定，渲染进程没有任何接口能在运行时切换——所以开关只能**把用户导向脚本**，点开确认框给出该双击的文件，点「复制命令」把路径和命令复制走。
+> 插件侧只能**检测**补丁是否存在：guest 拿到的分区以 `persist:` 开头即已开启，否则是内存分区；结果记进 `localStorage['dsh-chat-embed:persist']`，设置菜单在重启后立即显示该状态。壳在 `acquire(workspace)` 里只接收 workspace，分区名由主进程决定，渲染进程没有任何接口能在运行时切换——所以开关能做的不是"改分区"，而是**启动那个改分区的脚本**（见 5.2.2）。
 
 #### 5.2.1 为什么是一个脚本而不是一串手工步骤
 
@@ -147,11 +147,35 @@ this.configureSession(session.fromPartition(partition, { cache: false }))
 | 重复执行安全 | 状态已是目标值就只报告（`apply` 已开启 / `revert` 未开启），不写文件 |
 | 关闭不依赖备份 | `revert` 把两处改写**反向写回去**，`app.asar.orig` 只是额外保险；旧实现直接换回备份，一旦备份本身是补丁版就变成"点了关闭其实没关掉" |
 | 备份不被污染 | `apply` 只在 `app.asar.orig` 缺失或本身被污染时才写；干净的备份永不被补丁版覆盖 |
-| 壳在跑也能完成 | Windows 上运行中的 `app.asar` 被内存映射占用，改名报 `EBUSY`；脚本原地等待并提示退出 DSH，退出后继续。macOS/Linux 上 `rename` 当场成功，下次启动生效 |
+| 壳在跑也能完成 | 见 5.2.2：脚本等壳退出再换文件（`--restart` 时还会把壳重新打开） |
 | 权限不够时 | 写探测失败即请求提权（Windows `Start-Process -Verb RunAs`，macOS `osascript ... with administrator privileges`），整段操作在提权后的进程里重跑 |
-| 跨平台 | 同一个 `.mjs` 里平台差异只有：安装目录候选（`Program Files` / `*.app/Contents/Resources`）、启动器后缀（`.cmd` / `.command`）、提权方式 |
+| 跨平台 | 同一个 `.mjs` 里平台差异只有：安装目录候选（`Program Files` / `*.app/Contents/Resources`）、启动器后缀（`.cmd` / `.command`）、提权方式、重开壳的方式（`open` vs 直接 `spawn`） |
 
 启动器（`.cmd` / `.command`）只做三件事：找 Node（DSH 自带运行时优先，其次 PATH、常见安装位置）、转交参数、结束时留住窗口。补丁逻辑一行都不在启动器里。
+
+#### 5.2.2 开关就是启动器：谁执行、谁退出、谁写入
+
+三条边界，缺一条就会写坏东西：
+
+| 角色 | 做什么 | 不做什么 |
+| --- | --- | --- |
+| 渲染进程（`client.js`） | 点开关 → `GET /dsh-chat-embed/patch?action=…&token=…`，成功后显示"请从托盘退出 DSH" | 不碰文件、不猜路径、不问模型 |
+| Host 进程（`index.js`） | 判断能不能跑（`noapp` / `unsupported` / `same` / `denied` / `failed` / `started`），用**自己所在的运行时**（`process.execPath` + `ELECTRON_RUN_AS_NODE`）把脚本 `detached` 起来 | 一个字节都不写 |
+| 脚本（`shell-patch.mjs`） | 建补丁 → 校验 → 等 DSH 退出 → 换文件 → 重新打开 DSH | 不再索取除"退出 DSH"之外的任何操作 |
+
+为什么最后一步"退出 DSH"必须由人来做（都从壳的 `lib/main.js` / `lib/preload-app.cjs` 里查过）：
+
+| 想做的事 | 实际情况 |
+| --- | --- |
+| 页面里调退出 | `DESKTOP_IPC` 全表（35 个通道）没有 quit/restart |
+| 关窗即退出 | 窗口 `close` 被 `preventDefault()` 后 `hideMainWindow()`，只是收进托盘 |
+| 外部请它退出 | `before-quit` 里 `preventDefault()`，除非应用菜单的 `role:'quit'`、托盘、崩溃恢复或开发模式设了 `skipQuitConfirmation` |
+| 插件让它退出 | 插件跑在壳的**子进程**里，两者之间只有 `quit-inspection`（壳问插件"有任务在跑吗"）和 `updateTasks`，没有反方向的退出请求 |
+| 不退出直接换 | 运行中的 `app.asar` 被壳映射，Windows 上 `rename` 必然 EBUSY |
+
+所以开关把"等退出"这一步交给脚本的 `waitForExit`（`process.kill(pid, 0)` 轮询，`--pid` 由 Host 传入壳的 PID），超时（默认 10 分钟）就删掉暂存文件退出，**归档一个字节都不动**。
+
+读取 `app.asar` 一律走 Electron 的 `original-fs`：补丁过的 `node:fs` 把 `.asar` 当成压缩包——`readFileSync` 报 ENOENT、`statSync` 归零、`existsSync` 为 false、写入报 `Invalid package`。Host 与脚本各自在启动时选一次（有 `original-fs` 就用它，普通 Node 用 `node:fs`），否则探针会在桌面版里误报"没有安装目录"，脚本也会当场失败。
 
 ---
 
@@ -342,15 +366,19 @@ idle → acquiring → navigating → ready
 | `log` | 调试日志开关与最近 50 条环形缓冲；`{ enabled: true/false }` 开关，`{ clear: true }` 清空。默认关闭，关闭时不打印也不缓冲 |
 | `locale` | 当前活跃语言（`active`）、可用语言列表、`<html lang>`，以及面板文案当前解析出的样例（`sample` / `zhSample` / `enSample`） |
 
-Host 半侧另有两条只读通道，专门用来回答"为什么重启后要重新登录"：
+Host 半侧另有两条专门回答"为什么重启后要重新登录"的通道：
 
 | 通道 | 内容 |
 | --- | --- |
-| `GET /dsh-chat-embed/patch-check` | 安装目录、`app.asar` 是否可写、是否已打补丁、补丁点是否还存在、备份**是否干净**、脚本与启动器的绝对路径、开启/关闭两条命令、大小与内容哈希 |
+| `GET /dsh-chat-embed/patch-check` | 安装目录、`app.asar` 是否可写、是否已打补丁、补丁点是否还存在、备份**是否干净**、脚本与启动器的绝对路径、开启/关闭两条命令、大小与内容哈希、开关要用的 token |
+| `GET /dsh-chat-embed/patch?action=apply\|revert&token=…` | 只回答"能不能现在跑"（`started` / `same` / `denied` / `unsupported` / `noapp` / `failed`）；能跑就用 Host 自己的运行时把脚本 `detached` 起来，Host 不写任何文件 |
 
-客户端拿到探针结果后**不开会话、不问模型**：确认框里直接写脚本的绝对路径，主按钮把「路径 + 命令」复制到剪贴板。补丁怎么改、改哪两处、怎么校验，全部在脚本里，不经过任何模型的判断。
+两条都是 GET：这条 HTTP 载体（`@deepseek-ai/dsh-host-webserver`）只把 GET/HEAD 交给路由，其余方法在匹配之前就 405，请求体根本不会被读取。会改状态的那条因此靠**探针发的一次性 token** 把关——token 只在探针响应体里，别的源读不到（这里不发任何 CORS 头）。
 
-> 读取 `app.asar` 必须走 Electron 的 `original-fs`：被补丁过的 `node:fs` 会把以 `.asar` 结尾的路径当成目录，`readFileSync` 直接 ENOENT。探针优先用 `original-fs`，普通 Node 下回落到 `node:fs`。
+客户端拿到探针结果后**不开会话、不问模型**：点开关就直接请求那条执行路由；只有它跑不起来（要管理员权限、壳改了分区写法、没有安装目录、Host 版本还没有这条路由）才打开确认框，里面给出脚本绝对路径，主按钮把「路径 + 命令」复制到剪贴板。补丁怎么改、改哪两处、怎么校验，全部在脚本里，不经过任何模型的判断。
+
+> 读取 `app.asar` 必须走 Electron 的 `original-fs`：被补丁过的 `node:fs` 会把以 `.asar` 结尾的路径当成压缩包，`readFileSync` 直接 ENOENT、`statSync` 归零、`existsSync` 为 false、写入报 `Invalid package`。Host 与脚本都优先用 `original-fs`，普通 Node 下回落到 `node:fs`。
+
 | `openPanel` | 选中中央面板（等价于点左栏图标；探针路径不等于真实点击，见下） |
 | `openRight` | 展开右栏并打开聊天 tab，报告每一步的错误 |
 | `prefer` | 把席位偏好切到 `main` / `right`，返回解析后的席位与宿主 |

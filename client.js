@@ -115,7 +115,7 @@ window.__ModuleLoader__.load({
 let activeCtx = undefined
 
     /** Build identity, surfaced in the panel so a packaged app can be diagnosed. */
-    const BUILD = '0.6.12'
+    const BUILD = '0.6.13'
 
     /** Where a re-applied instance finds the one it must take over from. */
     const INSTANCE_KEY = '__DSH_CHAT_EMBED_INSTANCE__'
@@ -276,13 +276,22 @@ let activeCtx = undefined
         persistHint: 'Needs the shell patch; a plugin cannot change how the shell names partitions.',
         persistRisk:
           'Experimental: the patch rewrites the app.asar of the desktop shell and needs write access to its install folder. A shell update replaces it, so the patch has to be applied again.',
-        persistCheckHint: 'Run the patch script, then restart DSH',
+        persistCheckHint: 'Click to apply the patch now; it asks you to quit DSH',
         persistConfirmTitle: 'Turn on “login across restarts”?',
-        persistConfirmNote: 'No session is needed: the script below does the whole thing. Run it, quit DSH when it says so, and it swaps the file and tells you to restart.',
+        persistConfirmNote:
+          'The switch runs this script by itself. This copyable command is the fallback for when it cannot: run it, quit DSH when it says so, and it swaps the file.',
         persistConfirmGo: 'Copy command',
         persistConfirmCancel: 'Cancel',
         persistOffTitle: 'Turn off "logins survive restarts"?',
         persistOffBody: 'This removes the patch and puts the original app.asar back. Every restart will ask you to sign in again; flip the switch to undo.',
+        patchPending: 'Patch ready',
+        patchPendingHint:
+          'Quit DSH from the tray (right-click the tray icon → Quit). The archive is swapped and DSH reopens on its own.',
+        patchNeedsAdmin: 'The install folder needs administrator rights, so it cannot run from here. Run the command below as administrator.',
+        patchNoInstall: 'No DSH desktop install was found, so there is no shell to patch. Open this panel in the desktop app.',
+        patchSame: 'Nothing to change: the shell archive is already in that state.',
+        patchNoRoute: 'This DSH build has no route for the switch yet; run the command below instead.',
+        patchStartFailed: 'The patch could not be started:',
         patchScriptLabel: 'Script',
         patchCommandLabel: 'Command',
         patchScriptMissing: 'The patch script is not in this install (tools/shell-patch). The plugin may live elsewhere, or the package is incomplete.',
@@ -364,13 +373,21 @@ let activeCtx = undefined
         persistUnknown: '尚未检测',
         persistHint: '需要桌面壳补丁；插件无法改变壳的分区命名。',
         persistRisk: '实验性功能：补丁会改写桌面壳的 app.asar，需要安装目录的写权限；桌面壳升级会覆盖补丁，需要重新打一次。',
-        persistCheckHint: '运行补丁脚本，改完重启 DSH',
+        persistCheckHint: '点一下直接执行补丁，会请你退出 DSH',
         persistConfirmTitle: '开启「重启保持登录」？',
-        persistConfirmNote: '不需要开会话：下面这个脚本自己完成全部操作。运行它，按提示退出 DSH，脚本会替换好文件并提醒你重启。',
+        persistConfirmNote:
+          '开关会自己运行这个脚本；只有它跑不起来时才需要下面这条命令：运行它，按提示退出 DSH，脚本会替换好文件。',
         persistConfirmGo: '复制命令',
         persistConfirmCancel: '取消',
         persistOffTitle: '关闭「重启保持登录」？',
         persistOffBody: '会撤掉补丁、恢复原版 app.asar。之后每次重启都要重新登录；想再开启，再点一次这个开关即可。',
+        patchPending: '补丁已就绪',
+        patchPendingHint: '请从托盘退出 DSH（右键托盘图标 →「退出」），退出后自动替换并重新打开。',
+        patchNeedsAdmin: '安装目录需要管理员权限，这里没法直接执行。请以管理员身份运行下面的命令。',
+        patchNoInstall: '没有找到 DSH 桌面版安装目录，没有可以打补丁的壳。请在桌面版里打开本面板。',
+        patchSame: '不用改：桌面壳档案已经是这个状态。',
+        patchNoRoute: '这个 DSH 版本还没有提供开关用的通道；请改运行下面的命令。',
+        patchStartFailed: '没能启动补丁：',
         patchScriptLabel: '脚本',
         patchCommandLabel: '命令',
         patchScriptMissing: '这个安装里找不到补丁脚本（tools/shell-patch）。插件可能装在别处，或包不完整。',
@@ -2164,7 +2181,8 @@ let activeCtx = undefined
               const workspace = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined
               out.uiWorkspace = workspace !== undefined && workspace !== null
               out.uiWorkspaceStartSession = out.uiWorkspace && typeof workspace.startSession === 'function'
-              out.patchCheckRunning = patchCheck.running
+              out.patchRunning = patchAction.running
+              out.patchPending = patchAction.pending
               out.activeCtx = activeCtx !== undefined && activeCtx !== null
               out.probeLoaded = patchProbe.loaded
               if (out.service) {
@@ -2544,13 +2562,15 @@ let activeCtx = undefined
     }
 
     /**
-     * Host-side probe state for the "check the patch setup" button. The Host
-     * half answers, so a renderer without Node access can still report where
-     * the shell lives and whether the archive is writable.
+     * State behind the "login across restarts" switch.
      *
-     * @type {{ running: boolean, report: string }}
+     * Clicking it starts the patch script through the Host. `pending` means a
+     * script is running and waiting for DSH to exit, so the panel stops
+     * pretending a restart is still needed.
+     *
+     * @type {{ running: boolean, pending: boolean, action: string }}
      */
-    const patchCheck = { running: false }
+    const patchAction = { running: false, pending: false, action: 'on' }
 
     /** One-shot cache of the Host probe, so both actions read the same facts. */
     const patchProbe = { loaded: false, value: undefined }
@@ -2598,13 +2618,118 @@ let activeCtx = undefined
       return patchProbe.value
     }
 
+    /**
+     * What to tell the user when the action did not start.
+     *
+     * @param {(key: string) => string} t
+     * @param {any} body the Host's answer, when there was one
+     * @returns {string}
+     */
+    function patchFallbackText(t, body) {
+      const state = body !== undefined && body !== null && typeof body.state === 'string' ? body.state : ''
+      const detail = body !== undefined && body !== null && typeof body.detail === 'string' ? body.detail : ''
+      const lead =
+        state === 'denied'
+          ? t('patchNeedsAdmin')
+          : state === 'noapp'
+            ? t('patchNoInstall')
+            : state === 'unsupported'
+              ? t('patchNoSite')
+              : state === 'same'
+                ? t('patchSame')
+                : t('patchNoRoute')
+      return detail === '' ? lead : lead + ' ' + detail
+    }
+
+    /**
+     * Ask the Host to run the patch script — the switch's whole job.
+     *
+     * A click that can work does not open a dialog: the Host spawns the script,
+     * the script waits for DSH to exit, swaps the archive, and starts DSH
+     * again. The dialog is the fallback for the cases where nothing can be
+     * started from here (an older Host without the route, an install folder
+     * that needs administrator rights, a shell whose patch site moved, no
+     * install at all), and it still carries the exact command, because a user
+     * who cannot click their way out needs something to run.
+     *
+     * @param {(key: string) => string} t
+     * @param {string} mode 'on' or 'off'
+     * @returns {Promise<{ lead: string, script: string | undefined }>} `lead` is
+     *   empty when the script started; otherwise it explains the dialog
+     */
+    async function startPatchAction(t, mode) {
+      if (patchAction.running) return { lead: '', script: undefined }
+      patchAction.running = true
+      patchAction.action = mode
+      notify()
+      const action = mode === 'off' ? 'revert' : 'apply'
+      let script
+      try {
+        log('info', 'patch-action: entered (' + action + ')')
+        const probe = await fetchProbe()
+        const info = probe !== undefined && probe !== null ? probe : {}
+        if (probe !== undefined && probe !== null) {
+          // The launcher is what a user double-clicks; a platform without one
+          // still gets the script, which is the same thing with a command in
+          // front of it.
+          script =
+            typeof info.launcher === 'string' && info.launcher !== ''
+              ? info.launcher
+              : typeof info.script === 'string' && info.script !== ''
+                ? info.script
+                : ''
+        }
+        const token = typeof info.token === 'string' ? info.token : ''
+        if (token === '') {
+          log('warn', 'patch-action: the Host has no action route yet')
+          return { lead: t('patchNoRoute'), script }
+        }
+        // The carrier behind these routes answers GET/HEAD only, so the action
+        // is a GET guarded by the token the probe just handed out.
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 8000)
+        let response
+        try {
+          response = await fetch('./dsh-chat-embed/patch?action=' + action + '&token=' + encodeURIComponent(token), {
+            method: 'GET',
+            headers: { accept: 'application/json' },
+            cache: 'no-store',
+            signal: controller.signal,
+          })
+        } finally {
+          clearTimeout(timer)
+        }
+        let body
+        try {
+          body = await response.json()
+        } catch (error) {
+          log('warn', 'patch-action: the answer was not JSON: ' + messageOf(error))
+          body = undefined
+        }
+        if (body !== undefined && body !== null && body.ok === true && body.state === 'started') {
+          patchAction.pending = true
+          log('info', 'patch-action: started ' + action)
+          notify()
+          return { lead: '', script }
+        }
+        log('warn', 'patch-action: not started (' + (body === undefined ? 'no body' : String(body.state)) + ')')
+        return { lead: patchFallbackText(t, body), script }
+      } catch (error) {
+        log('error', 'patch-action: failed', messageOf(error))
+        return { lead: t('patchStartFailed') + ' ' + messageOf(error), script }
+      } finally {
+        patchAction.running = false
+        notify()
+      }
+    }
+
     async function copyPatchCommand(t, mode) {
       // No session, no agent: the script does the whole job, so all this has to
       // do is put its exact path and command on the clipboard. Every step is
       // logged and the reason comes back to the dialog, because a click that
       // does nothing is indistinguishable from a broken build.
       let failure = ''
-      patchCheck.running = true
+      patchAction.running = true
       notify()
       try {
         log('info', 'patch-command: entered')
@@ -2618,7 +2743,7 @@ let activeCtx = undefined
         failure = messageOf(error)
         log('error', 'patch-command: failed', failure)
       } finally {
-        patchCheck.running = false
+        patchAction.running = false
         notify()
       }
       return failure
@@ -3274,6 +3399,10 @@ let activeCtx = undefined
       const [confirmOpen, setConfirmOpen] = React.useState(false)
       const [confirmError, setConfirmError] = React.useState('')
       const [confirmMode, setConfirmMode] = React.useState('on')
+      // Why the dialog is open at all: the action could not start, and this
+      // line says which reason applied. Empty on a dialog opened by a click
+      // that never tried to start anything.
+      const [confirmLead, setConfirmLead] = React.useState('')
       // The launcher path the dialog names. Three states, because "still
       // asking the Host" must not read as "this install has no script":
       //   undefined  the probe has not answered yet
@@ -3358,14 +3487,18 @@ let activeCtx = undefined
       const record = guestRecord(provider.id)
 
       // The status strip only earns its space while something is happening or
-      // wrong; a healthy tab shows nothing but its tabs.
-      const showStatus = snapshot.phase !== PHASE.READY && snapshot.phase !== PHASE.IDLE
+      // wrong; a healthy tab shows nothing but its tabs. A pending patch is
+      // "something is happening": the script is waiting for DSH to exit, and
+      // the user has to quit it from the tray, so say so where they look.
+      const patchPending = patchAction.pending
+      const showStatus = patchPending || snapshot.phase !== PHASE.READY && snapshot.phase !== PHASE.IDLE
       // A problem keeps the bar reachable without hunting for it.
       const barVisible =
         barOpen ||
         menuOpen ||
         record.diagOpen ||
         record.oauthBlocked ||
+        patchPending ||
         snapshot.phase === PHASE.FAILED
       const reloadTitle =
         t('reload') +
@@ -3537,31 +3670,27 @@ let activeCtx = undefined
                     'data-persist-open': 'true',
                     'aria-label': t('persistLabel'),
                     title: t('persistCheckHint'),
-                    disabled: patchCheck.running,
+                    disabled: patchAction.running,
                     onClick: () => {
-                      log('info', 'dialog: opened by the restart-login switch')
+                      // The switch is the control, not a question: a click that
+                      // can work starts the script straight away. The dialog is
+                      // the fallback, so it only opens when nothing started.
+                      const target = persistenceState() === 'on' ? 'off' : 'on'
+                      log('info', 'patch: restart-login switch -> ' + target)
                       closeMenu()
-                      // The switch is a switch: on means the next click offers to undo it.
-                      setConfirmMode(persistenceState() === 'on' ? 'off' : 'on')
-                      // The dialog names the file to run, so it must know where the
-                      // plugin put it. Until the probe answers, say nothing rather
-                      // than guess a path that may not exist.
-                      setConfirmScript(undefined)
-                      setConfirmOpen(true)
-                      void fetchProbe().then((probe) => {
-                        const info = probe !== undefined && probe !== null ? probe : {}
-                        // The launcher is what a user double-clicks; a platform
-                        // without one still gets the script, which is the same
-                        // thing with one command in front of it.
-                        const shown =
-                          typeof info.launcher === 'string' && info.launcher !== ''
-                            ? info.launcher
-                            : typeof info.script === 'string' && info.script !== ''
-                              ? info.script
-                              : ''
-                        setConfirmScript(shown)
-                        notify()
-                      })
+                      void startPatchAction(t, target).then(
+                        (outcome) => {
+                          if (outcome === undefined || outcome === null || outcome.lead === '') return
+                          setConfirmMode(target)
+                          setConfirmLead(outcome.lead)
+                          setConfirmScript(outcome.script)
+                          setConfirmOpen(true)
+                          notify()
+                        },
+                        (error) => {
+                          log('error', 'patch: startPatchAction rejected', messageOf(error))
+                        },
+                      )
                     },
                   }),
                 ),
@@ -3624,6 +3753,7 @@ let activeCtx = undefined
                   { className: 'dce-card-title' },
                   t(confirmMode === 'off' ? 'persistOffTitle' : 'persistConfirmTitle'),
                 ),
+                confirmLead === '' ? null : h('div', { className: 'dce-card-body', 'data-persist-lead': 'true' }, confirmLead),
                 h('div', { className: 'dce-card-body' }, t(confirmMode === 'off' ? 'persistOffBody' : 'persistRisk')),
                 confirmMode === 'off' ? null : h('div', { className: 'dce-card-body' }, t('persistConfirmNote')),
                 confirmScript === undefined
@@ -3646,7 +3776,7 @@ let activeCtx = undefined
                       type: 'button',
                       className: 'dce-button dce-button-primary',
                       'data-persist-confirm': 'true',
-                      disabled: patchCheck.running,
+                      disabled: patchAction.running,
                       onClick: () => {
                         log('info', 'dialog: the confirm button was clicked')
                         setConfirmError('')
@@ -3671,10 +3801,22 @@ let activeCtx = undefined
           showStatus
             ? h(
                 'div',
-                { className: 'dce-status-bar' },
-                h('span', { className: 'dce-dot', 'data-phase': snapshot.phase, 'aria-hidden': true }),
-                h('span', { className: 'dce-status' }, t(STATUS_KEY[snapshot.phase] || 'statusIdle')),
-                snapshot.detail === '' ? null : h('span', { className: 'dce-diag' }, snapshot.detail),
+                { className: 'dce-status-bar', 'data-patch-pending': patchPending ? 'true' : 'false' },
+                h('span', {
+                  className: 'dce-dot',
+                  'data-phase': patchPending ? 'pending' : snapshot.phase,
+                  'aria-hidden': true,
+                }),
+                h(
+                  'span',
+                  { className: 'dce-status' },
+                  patchPending ? t('patchPending') : t(STATUS_KEY[snapshot.phase] || 'statusIdle'),
+                ),
+                patchPending
+                  ? h('span', { className: 'dce-diag' }, t('patchPendingHint'))
+                  : snapshot.detail === ''
+                    ? null
+                    : h('span', { className: 'dce-diag' }, snapshot.detail),
               )
             : null,
           h(
@@ -3911,7 +4053,9 @@ let activeCtx = undefined
         patchInstructions,
         fetchProbe,
         patchProbe,
-        patchCheck,
+        patchAction,
+        startPatchAction,
+        patchFallbackText,
         copyPatchCommand,
         setLogging,
         clearLog,

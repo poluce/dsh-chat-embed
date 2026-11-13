@@ -178,6 +178,15 @@ if (clientSource !== undefined) {
     if (!/readAsarEntry/.test(hostSource)) {
       fail('index.js: the probe must read app.asar itself (readAsarEntry)')
     }
+    // The switch runs the script through the Host, so the route and the spawn
+    // are load-bearing: a build without either brings back the copy-a-command
+    // dance and nothing tells the user why.
+    if (!/PATCH_PATH\s*=\s*'\/dsh-chat-embed\/patch'/.test(hostSource)) {
+      fail('index.js: the switch needs its own route (PATCH_PATH)')
+    }
+    if (!/function spawnPatcher\b/.test(hostSource)) {
+      fail('index.js: the Host must be able to start the patch script (spawnPatcher)')
+    }
   }
   // One script, one command per direction, two launchers: that is the whole
   // surface a user has to touch, so a missing piece is a broken feature.
@@ -188,6 +197,9 @@ if (clientSource !== undefined) {
   }
   if (!/persistRisk/.test(clientSource) || !/patchInstructions/.test(clientSource)) {
     fail('client.js: the panel must keep the experimental notice and the patch instructions')
+  }
+  if (!/startPatchAction/.test(clientSource)) {
+    fail('client.js: the switch must start the patch script itself (startPatchAction)')
   }
   if (/startSession\(/.test(clientSource.split('function patchInstructions')[0].split('function copyPatchCommand')[1] || '')) {
     fail('client.js: handing over the patch must not open a session')
