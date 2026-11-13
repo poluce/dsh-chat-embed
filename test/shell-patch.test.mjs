@@ -119,6 +119,37 @@ function run(args) {
   return { code: result.status === null ? -1 : result.status, out: (result.stdout || '') + (result.stderr || '') }
 }
 
+/**
+ * Run the CLI without blocking this event loop.
+ *
+ * The `--restart` tests need the stand-in app to be reaped *while* the script is
+ * waiting for it. A blocking `spawnSync` freezes this process, so on POSIX the
+ * exited child stays a zombie; `signal 0` still succeeds on a zombie, the script
+ * sees a live app, and it waits until its own timeout instead of continuing.
+ *
+ * @param {string[]} args
+ * @returns {Promise<{ code: number, out: string }>}
+ */
+function runAsync(args) {
+  return new Promise((done) => {
+    const child = spawn(process.execPath, [SCRIPT, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    const collect = (chunk) => {
+      out += chunk
+    }
+    child.stdout.on('data', collect)
+    child.stderr.on('data', collect)
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      done({ code: -1, out: out + '\n[the script did not finish]' })
+    }, 60000)
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      done({ code: code === null ? -1 : code, out })
+    })
+  })
+}
+
 /** @param {string} dir @returns {string} the archive's sha256 */
 function archiveHash(dir) {
   return hashOf(readFileSync(join(dir, 'app.asar')))
@@ -261,12 +292,12 @@ function fakeApp(ms) {
   return child
 }
 
-test('--restart waits for the app to exit, then swaps and reopens it', () => {
+test('--restart waits for the app to exit, then swaps and reopens it', async () => {
   const dir = install(buildAsar(ENTRIES))
   const original = readFileSync(join(dir, 'app.asar'))
   const app = fakeApp(700)
 
-  const { code, out } = run([
+  const { code, out } = await runAsync([
     'apply',
     '--resources',
     dir,
@@ -274,12 +305,12 @@ test('--restart waits for the app to exit, then swaps and reopens it', () => {
     '--restart',
     '--pid',
     String(app.pid),
-    // `node` with no arguments and a closed stdin starts a REPL and exits at
+    // A Node with no arguments and a closed stdin starts a REPL and exits at
     // once: a portable "program that runs" for the relaunch branch.
     '--exe',
     process.execPath,
   ])
-  assert.equal(code, 0)
+  assert.equal(code, 0, out)
   assert.match(out, /DSH 已退出/, 'it waited for the process instead of retrying the rename')
   assert.match(out, /已重新打开 DSH/)
   assert.match(out, /完成，DSH 已重新打开/)
@@ -287,12 +318,12 @@ test('--restart waits for the app to exit, then swaps and reopens it', () => {
   assert.equal(existsSync(join(dir, 'app.asar.new')), false, 'no staged file is left behind')
 })
 
-test('--restart gives up rather than patching a DSH that never exits', () => {
+test('--restart gives up rather than patching a DSH that never exits', async () => {
   const dir = install(buildAsar(ENTRIES))
   const before = archiveHash(dir)
   const app = fakeApp(30000)
   try {
-    const { code, out } = run([
+    const { code, out } = await runAsync([
       'apply',
       '--resources',
       dir,
@@ -312,22 +343,22 @@ test('--restart gives up rather than patching a DSH that never exits', () => {
   }
 })
 
-test('--restart without --exe asks the user to reopen DSH itself', () => {
+test('--restart without --exe asks the user to reopen DSH itself', async () => {
   const dir = install(buildAsar(ENTRIES))
   const app = fakeApp(300)
 
-  const { code, out } = run(['apply', '--resources', dir, '--yes', '--restart', '--pid', String(app.pid)])
-  assert.equal(code, 0)
+  const { code, out } = await runAsync(['apply', '--resources', dir, '--yes', '--restart', '--pid', String(app.pid)])
+  assert.equal(code, 0, out)
   assert.match(out, /请自己打开 DSH/)
   assert.doesNotMatch(out, /已重新打开 DSH/, 'it never claims a relaunch it did not do')
 })
 
-test('a relaunch that cannot start says so and keeps the swap', () => {
+test('a relaunch that cannot start says so and keeps the swap', async () => {
   const dir = install(buildAsar(ENTRIES))
   const original = readFileSync(join(dir, 'app.asar'))
   const app = fakeApp(300)
 
-  const { code, out } = run([
+  const { code, out } = await runAsync([
     'apply',
     '--resources',
     dir,
@@ -338,7 +369,7 @@ test('a relaunch that cannot start says so and keeps the swap', () => {
     '--exe',
     join(dir, 'not-a-program-at-all.exe'),
   ])
-  assert.equal(code, 0, 'the patch landed; only the relaunch failed')
+  assert.equal(code, 0, out + ' — the patch landed; only the relaunch failed')
   assert.match(out, /没能自动打开 DSH/)
   assert.match(out, /请重新打开 DSH/, 'the closing line falls back to the prompt')
   assert.notEqual(hashOf(readFileSync(join(dir, 'app.asar'))), hashOf(original))
