@@ -22,6 +22,13 @@
 
 仓库没有运行时依赖，也没有 lock 文件，所以正常情况下 `npm ci` 会跳过；一旦加了依赖，锁文件出现后自动生效。
 
+`.github/workflows/publish.yml`：发布专用，**只有手动触发**（`workflow_dispatch`）。它跑门禁、校验版本一致性，然后用 **OIDC Trusted Publishing** 发布，仓库和本机都不保存任何 npm 令牌。由 `scripts/release.mjs` 触发，也可以手动：
+
+```powershell
+gh workflow run publish.yml -f version=0.6.9
+gh run watch
+```
+
 `.github/dependabot.yml`：每周一维护 `ci.yml` 里固定成 commit SHA 的 action。我们钉的是 `uses: owner/action@<40 位 SHA> # vX.Y.Z` 这种形式，Dependabot 认得行尾的版本注释，会把 SHA 换成新版本的完整 SHA 并同步更新注释。同周的 action 升级合成一个 PR。包本身没有依赖，所以没有声明 npm 生态。
 
 ## 发版步骤
@@ -32,7 +39,7 @@
 node scripts/release.mjs 0.6.7 --summary "一句话说明这次改了什么"
 ```
 
-它按顺序做六件事。**顺序的理由：先发布，后打 tag。** `npm publish` 是唯一不可逆的一步（72 小时后只能 deprecate），tag 与 Release 随时可删可重做；先做不可逆的，失败就停，不会留下"GitHub 有 Release、npm 没有包"的幽灵版本。
+它按顺序做六件事。**顺序的理由：先发布，后打 tag。** 发布到 npm 是唯一不可逆的一步（72 小时后只能 deprecate），tag 与 Release 随时可删可重做；先做不可逆的，失败就停，不会留下"GitHub 有 Release、npm 没有包"的幽灵版本。
 
 | 阶段 | 做什么 | 已经做过时怎么判断 |
 | --- | --- | --- |
@@ -41,7 +48,7 @@ node scripts/release.mjs 0.6.7 --summary "一句话说明这次改了什么"
 | commit | `git add -A` + 普通提交 | 工作树干净则跳过 |
 | push | 推送 master，触发 CI | — |
 | ci | 等这次推送的 CI 跑完，红了就停 | — |
-| publish | `npm publish` | registry 上已有该版本则跳过 |
+| publish | 触发 `publish.yml`，由 OIDC 在 CI 里发布 | registry 上已有该版本则跳过 |
 | tag | 打 tag 并推送（CI 再校验一次） | tag 已存在则跳过 |
 | release | `npm run pack:dist` + `gh release create` | Release 已存在则跳过 |
 
@@ -63,7 +70,7 @@ node scripts/release.mjs 0.6.7 --summary "..." --notes dist\notes.md   # Release
 npm run check                       # 1. 本地门禁
 #                                   2. git add -A && git commit && git push
 gh run list --repo poluce/dsh-chat-embed --limit 1   # 3. 等 CI 绿
-npm publish                         # 4. 发布到 npm（prepack 会自动再跑一次门禁）
+gh workflow run publish.yml -f version=<版本>   # 4. 发布（OIDC，在 CI 里跑）
 git tag v<版本>                      # 5. 打 tag 并推送
 git push origin refs/tags/v<版本>
 npm run pack:dist                   # 6. 打包 + 建 Release
@@ -87,15 +94,42 @@ Get-FileHash $env:TEMP\check\dsh-chat-embed-<版本>.tgz -Algorithm SHA256
 
 0.6.5 及之前的版本是「tag → Release → publish」，与上面的顺序相反。已发布的历史无法回溯修正，从下一个版本起按新顺序执行。
 
-## trusted publishing（未启用）
+## 发布凭证：OIDC Trusted Publishing
 
-目前用 `~/.npmrc` 里的 Granular token 发布（绕过 2FA），包上没有 provenance。切 OIDC 需要：
+发布走 `.github/workflows/publish.yml`，用 **OIDC** 换取一次性的短期凭证。**仓库里、本机上都没有 npm 令牌可偷。**
 
-1. npm 包设置页 → Trusted Publisher → GitHub Actions，填 owner `poluce`、repo `dsh-chat-embed`、workflow 文件名；
-2. 该配置**必须在 2 天内完成首次成功发布**，否则过期；
-3. 需要 workflow 带 `id-token: write`、GitHub-hosted runner、npm CLI ≥ 11.5.1、Node ≥ 22.14.0（`engines` 已收紧）。
+### 在 npm 侧登记（一次性，只有包所有者能做）
 
-提交历史正常累积之后，provenance 里的 commit SHA 会长期可达，npm 页面上的"source commit"链接不会失效。
+1. npm 包设置页 → **Trusted Publisher** → 选 **GitHub Actions**；
+2. 填三个字段：
+   - Organization or user：`poluce`
+   - Repository：`dsh-chat-embed`
+   - Workflow filename：`publish.yml`（**只填文件名，含扩展名，且必须与仓库里的一致**）
+3. Environment 留空（这个 workflow 没有用 GitHub Environment）；
+4. 保存后在 **2 天内完成首次成功发布**，否则这条配置过期作废。
+
+### CI 侧的要求（已在 workflow 里落实）
+
+- job 带 `id-token: write`；
+- 运行器是 GitHub-hosted（自托管不支持 OIDC）；
+- npm ≥ 11.5.1（workflow 里固定装 `npm@11.15.0`）；
+- **不设置** `NODE_AUTH_TOKEN` / `NPM_TOKEN`，残留令牌会干扰认证；
+- `actions/setup-node` 刻意不传 `registry-url`，否则它会在 `.npmrc` 里写一行空的 `_authToken`。
+
+### 为什么比令牌强
+
+| | Granular token（旧） | OIDC（现在） |
+| --- | --- | --- |
+| 存在形态 | 40 字符静态串，存在 `~/.npmrc` | 每次运行现签，几分钟后失效 |
+| 泄露后果 | 任何拿到的人在任何机器上都能发包 | 离开那次运行即无效 |
+| 绑定 | 无 | 仓库 + workflow 文件名 + 分支 |
+| provenance | 无 | 自动附带，用户可 `npm audit signatures` 验证 |
+
+### 迁移后可以做的收尾
+
+迁移验证通过后，去 npm 网页撤销那个 Bypass 2FA 的 Granular token，并把包设置收紧为"仅 Trusted Publishing"。这样即使旧 token 曾泄露也不再有价值。
+
+提交历史正常累积之后，provenance 里的 commit SHA 长期可达，npm 页面上"source commit"链接不会失效。
 
 ## 当前发布物
 
@@ -134,8 +168,8 @@ dsh plugin --profile desktop add git+https://github.com/poluce/dsh-chat-embed.gi
 - 发布后用一份干净 profile 验证：`dsh plugin --profile <新名字> add <包名>`，然后打开左栏入口；
 - 可选壳补丁（跨重启免登录）不是安装必需项；不装补丁时功能完整，只是重启后要重新登录；
 - npm 首次发布新包时会出现 `0.0.0-stage` 占位版本（staged publishing 机制），审核/发布完成后 `latest` 指向正式版本；占位版本可忽略；
-- 账号 2FA 使用通行密钥（passkey），CLI 发布需要交互式终端完成 WebAuthn，或在 npm 网页创建 **Bypass 2FA 的 Granular Token** 后用 `npm publish --//registry.npmjs.org/:_authToken=<token>`；
-- 带 Bypass 2FA 的直接发布能力 npm 计划 2027 年 1 月收紧，届时改用 trusted publishing 或 staged 流程。
+- 发布凭证走 OIDC，本机不需要任何 npm 令牌（见上文「发布凭证」）；本地 `npm publish` 已不再使用；
+- 若临时需要兜底，只能在 npm 网页创建 Bypass 2FA 的 Granular token，用完立刻撤销——npm 计划 2027 年 1 月收紧该能力。
 
 ## 提交到插件列表（awesome-dsh-plugin）
 

@@ -1,0 +1,87 @@
+# 通过 npm Trusted Publishing（OIDC）发布，仓库里不保存任何令牌。
+#
+# npm 包设置页登记的 workflow 文件名必须与这个文件完全一致：publish.yml。
+# 由 scripts/release.mjs 用
+#   gh workflow run publish.yml -f version=X.Y.Z
+# 触发；tag 与 GitHub Release 仍由那个脚本在本地创建，这样"先发布、后打 tag"
+# 的顺序不变，失败也不会留下没有包的 Release。
+
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号，必须与 package.json 一致'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# 两个发布同时跑会互相打脸，串行化。
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish (OIDC)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # OIDC 换取短期发布凭证，并自动附带 provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 不设 registry-url：它会在 .npmrc 里写一行 _authToken=${NODE_AUTH_TOKEN}，
+      # 空值也会让 npm 先尝试旧式令牌认证。默认 registry 就是 registry.npmjs.org。
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      # Trusted publishing 需要 npm >= 11.5.1；runner 自带的 npm 版本随 Node 漂移，
+      # 这里固定一个已验证可用的版本。
+      - name: Upgrade npm
+        run: npm install -g npm@11.15.0
+
+      - name: Report the npm and node in use
+        run: |
+          node --version
+          npm --version
+
+      - name: The requested version matches package.json
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "${REQUESTED}" != "${pkg}" ]; then
+            echo "::error::输入 ${REQUESTED} 与 package.json ${pkg} 不一致"
+            exit 1
+          fi
+          echo "版本一致：${pkg}"
+
+      # client.js 里的 BUILD 是面板显示的版本号，不一致就是对外撒谎。
+      - name: client BUILD matches package.json version
+        run: |
+          set -euo pipefail
+          pkg="$(node -p "require('./package.json').version")"
+          build="$(node -p "require('node:fs').readFileSync('client.js','utf8').match(/const BUILD = '([^']+)'/)[1]")"
+          if [ "${pkg}" != "${build}" ]; then
+            echo "::error::client.js BUILD ${build} 与 package.json ${pkg} 不一致"
+            exit 1
+          fi
+          echo "BUILD 一致：${build}"
+
+      - name: Gate
+        run: npm run check
+
+      # 刻意不设 NODE_AUTH_TOKEN / NPM_TOKEN：OIDC 模式下残留令牌会干扰认证。
+      - name: Publish
+        run: npm publish --provenance

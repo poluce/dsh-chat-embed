@@ -13,7 +13,7 @@
  *   3. commit     普通提交
  *   4. push       master，触发 CI
  *   5. ci         等这次推送的 CI 跑完，红了就停
- *   6. publish    npm publish（唯一不可逆的一步，因此排在 tag 之前）
+ *   6. publish    触发 publish.yml，由 OIDC 在 CI 里发布（不可逆，因此排在 tag 之前）
  *      tag        tag + 推送（CI 再校验一次 tag == version）
  *      release    打包 + gh release create
  *
@@ -292,6 +292,36 @@ async function waitForCi(ref) {
 }
 
 /**
+ * Wait for the publish workflow dispatched for `sha`.
+ *
+ * The run does not exist the instant `gh workflow run` returns, so this polls
+ * until a run for that commit appears and then until it finishes.
+ *
+ * @param {string} sha
+ * @returns {Promise<void>}
+ */
+async function waitForPublishRun(sha) {
+  const deadline = Date.now() + CI_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const raw = capture(
+      'gh',
+      ['run', 'list', '--repo', REPO, '--workflow', 'publish.yml', '--commit', sha, '--limit', '1', '--json', 'status,conclusion,url'],
+      { allowFailure: true },
+    )
+    if (raw !== '') {
+      const [entry] = JSON.parse(raw)
+      if (entry !== undefined && entry.status === 'completed') {
+        if (entry.conclusion !== 'success') die('publish.yml 失败（' + entry.conclusion + '）：' + entry.url)
+        say('  publish.yml 成功  ' + entry.url)
+        return
+      }
+    }
+    await sleep(CI_POLL_MS)
+  }
+  die('publish.yml 在 15 分钟内没有结束')
+}
+
+/**
  * Whether the registry already carries this version.
  *
  * The version endpoint answers as soon as the publish is recorded; dist-tags lag
@@ -426,10 +456,13 @@ async function main() {
     if (await publishedOnNpm(version)) {
       say('  npm 上已有 ' + version + '，跳过发布')
     } else if (dry) {
-      say('  [dry-run] 将执行 npm publish')
+      say('  [dry-run] 将触发 publish.yml（OIDC）并等它成功')
     } else {
-      run('npm', ['publish'])
-      say('  已提交发布；registry 异步处理，通常 2~4 分钟后才可下载')
+      // 发布走 publish.yml：凭证由 OIDC 现签，仓库和本机都不保存令牌。
+      const sha = capture('git', ['rev-parse', 'HEAD'])
+      run('gh', ['workflow', 'run', 'publish.yml', '--repo', REPO, '--ref', 'master', '-f', 'version=' + version])
+      await waitForPublishRun(sha)
+      say('  已发布；registry 异步处理，通常 2~4 分钟后才可下载')
     }
   }
 
