@@ -1514,6 +1514,29 @@ test('the prompt survives a Host that answers nothing', async () => {
   assert.doesNotMatch(prompt, /命令:/, 'no empty command block is invented')
 })
 
+test('turning the switch off hands over a restore, not an enable', async () => {
+  const instance = await createInstance({ shell: createFakeShell() })
+  attachSurface(instance)
+  const t = (key) => instance.internals.DICTS.zh[key] ?? key
+
+  const probe = {
+    resources: 'D:\\DSH\\resources',
+    asar: 'D:\\DSH\\resources\\app.asar',
+    writable: true,
+    patchSite: true,
+    patched: true,
+  }
+  const prompt = instance.internals.buildRestorePrompt(t, probe)
+
+  assert.match(prompt, /撤掉/, 'it asks for the patch to be removed')
+  assert.match(prompt, /app\.asar\.orig/, 'the restore names the backup copy')
+  assert.match(prompt, /app\.asar\.patched\.bak/, 'the current archive is kept, not deleted')
+  assert.match(prompt, /完全退出/, 'the restore says DSH must be closed first')
+  assert.match(prompt, /重新登录/, 'it states what turning the feature off costs')
+  assert.doesNotMatch(prompt, /patch-asar\.cjs build/, 'it is not the enable prompt again')
+  assert.ok(prompt.split('\n').length <= 12, 'still short: ' + prompt.split('\n').length + ' lines')
+})
+
 test('the prompt reflects the probe instead of restating it', async () => {
   const instance = await createInstance({ shell: createFakeShell() })
   attachSurface(instance)

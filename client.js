@@ -279,8 +279,12 @@ let activeCtx = undefined
         persistConfirmNote: 'Continuing opens a new session containing the task and the known facts; sending it lets the agent apply the patch and hand you the elevated command if permissions block it.',
         persistConfirmGo: 'Continue',
         persistConfirmCancel: 'Cancel',
-        persistOnTitle: 'Logins already survive restarts',
-        persistOnBody: 'Nothing to do. If a restart ever asks you to sign in again, open this switch once more and it will check whether a shell update replaced the patch.',
+        persistOffTitle: 'Turn off "logins survive restarts"?',
+        persistOffBody: 'This removes the patch and puts the original app.asar back. Every restart will ask you to sign in again; flip the switch to undo.',
+        restoreTask: 'Remove the DSH desktop shell patch that keeps embedded chat logins across restarts, restoring the original app.asar.',
+        restoreStepsTitle: 'Restore steps (DSH must be fully quit first)',
+        restoreWarning: 'After this, logins no longer survive a restart.',
+
         patchNoWorkspace: 'This composition has no Session service; the patch instructions were copied to the clipboard.',
         patchTask: 'Apply the DSH desktop shell patch that keeps embedded chat logins across restarts.',
         patchTaskDir: 'Install directory',
@@ -369,8 +373,11 @@ let activeCtx = undefined
         persistConfirmNote: '点击「继续」会打开一个新会话，里面是给它的任务说明和已知事实；发送后由它完成补丁操作，遇到权限问题会给出需要提权的命令。',
         persistConfirmGo: '继续',
         persistConfirmCancel: '取消',
-        persistOnTitle: '重启保持登录已开启',
-        persistOnBody: '登录态会跨重启保留，不需要再操作。如果某次重启后仍要重新登录，再点这个开关，它会检查补丁是不是被桌面壳升级覆盖了。',
+        persistOffTitle: '关闭「重启保持登录」？',
+        persistOffBody: '会撤掉补丁、恢复原版 app.asar。之后每次重启都要重新登录；想再开启，再点一次这个开关即可。',
+        restoreTask: '把 DSH 桌面版的「重启保持登录」补丁撤掉，恢复原版 app.asar。',
+        restoreStepsTitle: '还原步骤（必须在 DSH 完全退出后）',
+        restoreWarning: '撤掉后登录态不再跨重启保留，每次重启都要重新登录。',
         patchNoWorkspace: '当前拼装没有会话服务，补丁说明已复制到剪贴板。',
         patchTask: '给 DSH 桌面版打上「跨重启保持登录」补丁。',
         patchTaskDir: '安装目录',
@@ -2570,7 +2577,7 @@ let activeCtx = undefined
      * @param {(key: string) => string} t
      * @returns {Promise<void>}
      */
-    async function openPatchCheckSession(t) {
+    async function openPatchCheckSession(t, mode) {
       const host = activeCtx
       // Nothing in here may fail silently: a click that does nothing is
       // indistinguishable from a broken build, so every step is logged and the
@@ -2593,7 +2600,7 @@ let activeCtx = undefined
         notify()
         const probe = await fetchProbe()
         log('info', 'patch-check: probe ' + (probe === undefined || probe === null ? 'absent' : 'ok'))
-        const prompt = buildPatchPrompt(t, probe)
+        const prompt = mode === 'off' ? buildRestorePrompt(t, probe) : buildPatchPrompt(t, probe)
         patchProbe.loaded = false
         // A custom main panel stays selected when a Session opens, so the new
         // Session lands behind this panel and the click looks like a no-op.
@@ -2618,6 +2625,33 @@ let activeCtx = undefined
         notify()
       }
       return failure
+    }
+
+    /**
+     * The draft for the other direction: put the original app.asar back.
+     *
+     * Turning the switch off is a real operation, not a dead end — the patch
+     * kept a copy, so undoing it is a rename away.
+     *
+     * @param {(key: string) => string} t
+     * @param {any} [probe]
+     * @returns {string}
+     */
+    function buildRestorePrompt(t, probe) {
+      const info = probe !== undefined && probe !== null ? probe : {}
+      const lines = [t('restoreTask')]
+      if (typeof info.resources === 'string' && info.resources !== '') {
+        lines.push('', t('patchTaskDir') + ': ' + info.resources)
+      }
+      if (typeof info.asar === 'string' && info.asar !== '') {
+        lines.push('', t('restoreStepsTitle') + ':')
+        lines.push('  1. ' + info.asar + ' -> ' + info.asar + '.patched.bak')
+        lines.push('  2. ' + info.asar + '.orig -> ' + info.asar)
+      }
+      if (info.writable === false) lines.push('', t('patchTaskReadonly'))
+      lines.push('', t('restoreWarning'))
+      lines.push('', t('patchTaskVerify'))
+      return lines.join('\n')
     }
 
     /**
@@ -3292,7 +3326,7 @@ let activeCtx = undefined
       const [menuOpen, setMenuOpen] = React.useState(false)
       const [confirmOpen, setConfirmOpen] = React.useState(false)
       const [confirmError, setConfirmError] = React.useState('')
-      const [noticeOpen, setNoticeOpen] = React.useState(false)
+      const [confirmMode, setConfirmMode] = React.useState('on')
 
       /**
        * Close the settings menu.
@@ -3554,10 +3588,9 @@ let activeCtx = undefined
                     onClick: () => {
                       log('info', 'dialog: opened by the restart-login switch')
                       closeMenu()
-                      // Already on means there is nothing to hand an agent: a task Session
-                      // here would ask it to apply a patch that is already applied.
-                      if (persistenceState() === 'on') setNoticeOpen(true)
-                      else setConfirmOpen(true)
+                      // The switch is a switch: on means the next click offers to undo it.
+                      setConfirmMode(persistenceState() === 'on' ? 'off' : 'on')
+                      setConfirmOpen(true)
                     },
                   }),
                 ),
@@ -3615,9 +3648,15 @@ let activeCtx = undefined
                   'data-modal': 'true',
                   'aria-label': t('persistConfirmTitle'),
                 },
-                h('div', { className: 'dce-card-title' }, t('persistConfirmTitle')),
-                h('div', { className: 'dce-card-body' }, t('persistRisk')),
-                h('div', { className: 'dce-card-body' }, t('persistConfirmNote')),
+                h(
+                  'div',
+                  { className: 'dce-card-title' },
+                  t(confirmMode === 'off' ? 'persistOffTitle' : 'persistConfirmTitle'),
+                ),
+                h('div', { className: 'dce-card-body' }, t(confirmMode === 'off' ? 'persistOffBody' : 'persistRisk')),
+                confirmMode === 'off'
+                  ? null
+                  : h('div', { className: 'dce-card-body' }, t('persistConfirmNote')),
                 confirmError === '' ? null : h('div', { className: 'dce-card-detail' }, confirmError),
                 h(
                   'div',
@@ -3637,7 +3676,7 @@ let activeCtx = undefined
                       onClick: () => {
                         log('info', 'dialog: the confirm button was clicked')
                         setConfirmError('')
-                        void openPatchCheckSession(t).then(
+                        void openPatchCheckSession(t, confirmMode).then(
                           (failure) => {
                             if (typeof failure === 'string' && failure !== '') setConfirmError(failure)
                             else setConfirmOpen(false)
@@ -3651,32 +3690,6 @@ let activeCtx = undefined
                       },
                     },
                     t('persistConfirmGo'),
-                  ),
-                ),
-              )
-            : null,
-          noticeOpen
-            ? h('div', { className: 'dce-confirm-scrim', onPointerDown: () => setNoticeOpen(false) })
-            : null,
-          noticeOpen
-            ? h(
-                'div',
-                {
-                  className: 'dce-card',
-                  role: 'dialog',
-                  'aria-modal': 'true',
-                  'data-modal': 'true',
-                  'aria-label': t('persistOnTitle'),
-                },
-                h('div', { className: 'dce-card-title' }, t('persistOnTitle')),
-                h('div', { className: 'dce-card-body' }, t('persistOnBody')),
-                h(
-                  'div',
-                  { className: 'dce-card-actions' },
-                  h(
-                    'button',
-                    { type: 'button', className: 'dce-button dce-button-primary', onClick: () => setNoticeOpen(false) },
-                    t('dismiss'),
                   ),
                 ),
               )
@@ -3927,6 +3940,7 @@ let activeCtx = undefined
         patchCheck,
         openPatchCheckSession,
         buildPatchPrompt,
+        buildRestorePrompt,
         setLogging,
         clearLog,
         readLogEntries,
