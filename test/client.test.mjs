@@ -1480,7 +1480,7 @@ test('one row opens a confirm dialog before it opens a session', async () => {
   // The status line and the check switch are one row now: a label and a button.
   assert.equal(typeof internals.openPatchCheckSession, 'function')
   assert.ok(t('persistCheckHint').length > 0, 'the button explains that a session is coming')
-  assert.ok(t('persistAction').length > 0, 'the button has one fixed label regardless of state')
+  assert.match(internals.CSS, /\.dce-switch\{/, 'the row uses the shared switch styling')
 
   // The warning moved out of an inline note and into a modal, so the note styling
   // must be gone and the dialog styling present.
