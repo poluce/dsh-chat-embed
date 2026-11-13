@@ -259,11 +259,11 @@ function commitMessage(version, summary) {
  * @param {string} ref
  * @returns {{ status: string, conclusion: string, url: string } | undefined}
  */
-function runForRef(ref) {
+function runForRef(ref, workflow) {
   const sha = capture('git', ['rev-parse', 'HEAD'], { allowFailure: true })
   const raw = capture(
     'gh',
-    ['run', 'list', '--repo', REPO, '--branch', ref, '--commit', sha, '--limit', '1', '--json', 'status,conclusion,url'],
+    ['run', 'list', '--repo', REPO, '--workflow', workflow, '--branch', ref, '--commit', sha, '--limit', '1', '--json', 'status,conclusion,url'],
     { allowFailure: true },
   )
   if (raw === '') return undefined
@@ -280,7 +280,7 @@ function runForRef(ref) {
 async function waitForCi(ref) {
   const deadline = Date.now() + CI_TIMEOUT_MS
   while (Date.now() < deadline) {
-    const run = runForRef(ref)
+    const run = runForRef(ref, 'ci.yml')
     if (run !== undefined && run.status === 'completed') {
       if (run.conclusion !== 'success') die(ref + ' 的 CI 结论是 ' + run.conclusion + '：' + run.url)
       say('  ' + ref + ' CI 通过  ' + run.url)
