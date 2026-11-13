@@ -697,8 +697,8 @@ test('the locale probe reports the active language and the resolved copy', async
   const report = registration.query('locale')
   assert.equal(report.active, 'zh', 'the fake locale activates Chinese')
   assert.ok(report.locales.includes('zh') && report.locales.includes('en'))
-  assert.equal(report.sample, '跨重启保持登录', 'the panel copy resolves through the active locale')
-  assert.equal(report.zhSample, '跨重启保持登录')
+  assert.equal(report.sample, '重启保持登录', 'the panel copy resolves through the active locale')
+  assert.equal(report.zhSample, '重启保持登录')
   assert.equal(report.enSample, 'Login across restarts')
 })
 
@@ -708,7 +708,7 @@ test('switching the DSH language re-renders the panel without a reload', async (
   plugin.apply(harness.ctx)
 
   const translate = internals.translator()
-  assert.equal(translate('persistLabel'), '跨重启保持登录', 'the default language is Chinese')
+  assert.equal(translate('persistLabel'), '重启保持登录', 'the default language is Chinese')
   assert.equal(
     translate('rect', { left: 1, top: 2, width: 3, height: 4 }),
     '左1 上2 3×4',
@@ -948,7 +948,8 @@ test('the settings menu styles are present', async () => {
     /\.dce-menu\{[^}]*max-width:min\(420px,calc\(100% - 12px\)\)/,
     'the settings menu must cap its width so a long path cannot stretch it',
   )
-  assert.match(css, /\.dce-menu-note\{[^}]*overflow-wrap:anywhere/, 'report text wraps mid-token')
+  assert.match(css, /\.dce-confirm-scrim\{position:absolute;inset:0/, 'the confirm dialog dims the panel')
+  assert.match(css, /\.dce-card\[data-modal="true"\]\{z-index:8\}/, 'the confirm dialog sits above the menu')
   assert.match(css, /\.dce-menu\{position:absolute/, 'the menu floats above the page')
   assert.match(css, /\.dce-menu-scrim\{position:absolute;inset:0/, 'a scrim closes the menu on outside clicks')
 })
@@ -1472,18 +1473,29 @@ test('the settings menu keeps no self-check result in its own state', async () =
   assert.equal(internals.patchCheck.running, false)
 })
 
-test('the check row opens a session instead of rendering a report', async () => {
+test('one row opens a confirm dialog before it opens a session', async () => {
   const { internals } = await createInstance()
   const t = (key) => internals.DICTS.zh[key] ?? key
 
-  // The row is a switch-style control next to its label, not a wide menu item,
-  // and it carries no report element.
+  // The status line and the check switch are one row now: a label and a button.
   assert.equal(typeof internals.openPatchCheckSession, 'function')
-  assert.match(internals.CSS, /\.dce-switch\{/, 'the control reuses the switch styling')
+  assert.ok(t('persistCheckHint').length > 0, 'the button explains that a session is coming')
+  assert.notEqual(t('persistActionOn'), t('persistActionOff'), 'the button says whether it will check or enable')
+
+  // The warning moved out of an inline note and into a modal, so the note styling
+  // must be gone and the dialog styling present.
+  assert.doesNotMatch(internals.CSS, /\.dce-menu-note/, 'no inline note survives')
   assert.doesNotMatch(internals.CSS, /data-patch-report/, 'the inline report styling is gone')
-  assert.doesNotMatch(internals.CSS, /\.dce-menu-note\[data-patch-report/, 'no report box exists any more')
-  // The hint is what tells the user a new session is coming.
-  assert.ok(t('persistCheckHint').length > 0, 'the row explains what the switch does')
+  assert.match(internals.CSS, /\.dce-confirm-scrim\{position:absolute;inset:0/, 'the dialog dims the panel')
+  assert.match(internals.CSS, /\.dce-card\[data-modal="true"\]\{z-index:8\}/, 'the dialog sits above the menu')
+
+  // The warning text and both buttons exist in every language.
+  for (const key of ['persistConfirmTitle', 'persistConfirmNote', 'persistConfirmGo', 'persistConfirmCancel']) {
+    assert.ok(t(key).length > 0, key + ' is translated in zh')
+    assert.ok(internals.DICTS.en[key].length > 0, key + ' is translated in en')
+  }
+  assert.ok(t('persistRisk').length > 0, 'the dialog carries the experimental warning')
+  assert.match(t('persistConfirmNote'), /新会话/, 'the dialog says a session will open')
 })
 
 test('the prompt survives a Host that answers nothing', async () => {

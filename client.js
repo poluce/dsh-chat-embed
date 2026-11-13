@@ -262,9 +262,13 @@ window.__ModuleLoader__.load({
         persistHint: 'Needs the shell patch; a plugin cannot change how the shell names partitions.',
         persistRisk:
           'Experimental: the patch rewrites the app.asar of the desktop shell and needs write access to its install folder. A shell update replaces it, so the patch has to be applied again.',
-        persistCopy: 'Copy the patch instructions',
-        persistCheck: 'Check the patch setup',
         persistCheckHint: 'Opens a new session and drafts the check for you',
+        persistActionOn: 'Check',
+        persistActionOff: 'Enable',
+        persistConfirmTitle: 'Turn on “login across restarts”?',
+        persistConfirmNote: 'Continuing opens a new session with the known facts already in the composer — review them and press send.',
+        persistConfirmGo: 'Continue',
+        persistConfirmCancel: 'Cancel',
         patchPromptPlugin: 'Plugin',
         patchPrompt:
           'Check the DSH desktop shell patch that keeps the embedded chat logins across restarts, and tell me what to do.\n\nKnown so far:\n{facts}\n\nCall the dsh_chat_embed_patch_check tool to confirm the facts, then:\n1. say in a sentence or two what the situation is;\n2. if the patch is missing or was lost, give me the exact command to run;\n3. do not modify any file.',
@@ -347,16 +351,20 @@ window.__ModuleLoader__.load({
         loggingOn: '开',
         loggingOff: '关',
         loggingCopy: '复制日志',
-        persistLabel: '跨重启保持登录',
+        persistLabel: '重启保持登录',
         persistOn: '已开启（persist: 分区）',
         persistOff: '未开启（内存分区）',
         persistLost: '已失效（桌面壳升级覆盖了补丁）',
         persistUnknown: '尚未检测',
         persistHint: '需要桌面壳补丁；插件无法改变壳的分区命名。',
         persistRisk: '实验性功能：补丁会改写桌面壳的 app.asar，需要安装目录的写权限；桌面壳升级会覆盖补丁，需要重新打一次。',
-        persistCopy: '复制补丁说明',
-        persistCheck: '检查补丁配置',
         persistCheckHint: '打开新会话，把检查内容写好，点发送即可',
+        persistActionOn: '检查',
+        persistActionOff: '开启',
+        persistConfirmTitle: '开启「重启保持登录」？',
+        persistConfirmNote: '点击「继续」会打开一个新会话，把已知信息写进输入框，确认后发送即可。',
+        persistConfirmGo: '继续',
+        persistConfirmCancel: '取消',
         patchPromptPlugin: '插件',
         patchPrompt:
           '帮我检查 DSH 桌面版「跨重启保持登录」的补丁状态，并告诉我该做什么。\n\n已知信息：\n{facts}\n\n请先调用 dsh_chat_embed_patch_check 工具核对上面的信息，然后：\n1. 用一两句话说明现在是什么情况；\n2. 如果补丁没打或已失效，给出我可以直接执行的命令；\n3. 不要修改任何文件。',
@@ -2827,10 +2835,9 @@ window.__ModuleLoader__.load({
       '.dce-menu-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 8px;border-radius:6px;font-size:13px;color:var(--dsw-alias-label-primary,#1f2329)}',
       '.dce-menu-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
       '.dce-menu-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.dce-menu-value{flex:0 0 auto;font-size:12px;color:var(--dsw-alias-label-tertiary,#9aa0a6)}',
       '.dce-menu-sep{margin:5px 0 3px;border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.24))}',
-      '.dce-menu-note{margin:4px 8px 6px;font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-tertiary,#9aa0a6);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;box-sizing:border-box}',
-      '.dce-menu-note[data-persist-risk="true"]{color:var(--dsw-alias-label-warning,#c98b16)}',
+      '.dce-confirm-scrim{position:absolute;inset:0;z-index:7;background:rgba(0,0,0,.28)}',
+      '.dce-card[data-modal="true"]{z-index:8}',
       '.dce-menu-item{display:flex;align-items:center;justify-content:flex-start;gap:8px;width:100%;box-sizing:border-box;padding:6px 8px;border:0;border-radius:6px;background:transparent;color:inherit;font-size:13px;text-align:left;cursor:pointer}',
       '.dce-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
       '.dce-right-title{display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -3251,6 +3258,7 @@ window.__ModuleLoader__.load({
       // Auto-hiding tab bar: hidden until the pointer reaches the top hot zone.
       const [barOpen, setBarOpen] = React.useState(false)
       const [menuOpen, setMenuOpen] = React.useState(false)
+      const [confirmOpen, setConfirmOpen] = React.useState(false)
 
       /**
        * Close the settings menu.
@@ -3498,51 +3506,22 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'dce-menu-row' },
-                  h('span', { className: 'dce-menu-label' }, t('persistLabel')),
-                  h(
-                    'span',
-                    { className: 'dce-menu-value', title: t('persistHint') },
-                    persistenceText(t, persistenceState()),
-                  ),
-                ),
-                persistenceState() === 'on'
-                  ? null
-                  : h('div', { className: 'dce-menu-note', 'data-persist-risk': 'true' }, t('persistRisk')),
-                persistenceState() === 'on'
-                  ? null
-                  : h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'dce-menu-item',
-                        'data-patch-help': 'true',
-                        onClick: () => {
-                          void fetchProbe().then((probe) => copyText(patchInstructions(t, probe)))
-                        },
-                      },
-                      h('span', { className: 'dce-menu-label' }, t('persistCopy')),
-                    ),
-                h(
-                  'div',
-                  { className: 'dce-menu-row' },
-                  h('span', { className: 'dce-menu-label', title: t('persistCheckHint') }, t('persistCheck')),
+                  h('span', { className: 'dce-menu-label', title: t('persistHint') }, t('persistLabel')),
                   h(
                     'button',
                     {
                       type: 'button',
-                      role: 'switch',
-                      className: 'dce-switch',
-                      'data-on': patchCheck.running ? 'true' : 'false',
-                      'aria-checked': patchCheck.running ? 'true' : 'false',
-                      'data-patch-check': 'true',
-                      'aria-label': t('persistCheck'),
+                      className: 'dce-button',
+                      'data-persist-open': 'true',
+                      'aria-label': t('persistLabel'),
                       title: t('persistCheckHint'),
                       disabled: patchCheck.running,
                       onClick: () => {
                         closeMenu()
-                        void openPatchCheckSession(t)
+                        setConfirmOpen(true)
                       },
                     },
+                    persistenceState() === 'on' ? t('persistActionOn') : t('persistActionOff'),
                   ),
                 ),
                 h(
@@ -3579,6 +3558,49 @@ window.__ModuleLoader__.load({
                         setLogging(!logEnabled)
                       },
                     },
+                  ),
+                ),
+              )
+            : null,
+          confirmOpen
+            ? h('div', {
+                className: 'dce-confirm-scrim',
+                onPointerDown: () => setConfirmOpen(false),
+              })
+            : null,
+          confirmOpen
+            ? h(
+                'div',
+                {
+                  className: 'dce-card',
+                  role: 'dialog',
+                  'aria-modal': 'true',
+                  'data-modal': 'true',
+                  'aria-label': t('persistConfirmTitle'),
+                },
+                h('div', { className: 'dce-card-title' }, t('persistConfirmTitle')),
+                h('div', { className: 'dce-card-body' }, t('persistRisk')),
+                h('div', { className: 'dce-card-body' }, t('persistConfirmNote')),
+                h(
+                  'div',
+                  { className: 'dce-card-actions' },
+                  h(
+                    'button',
+                    { type: 'button', className: 'dce-button', 'data-persist-cancel': 'true', onClick: () => setConfirmOpen(false) },
+                    t('persistConfirmCancel'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dce-button dce-button-primary',
+                      'data-persist-confirm': 'true',
+                      onClick: () => {
+                        setConfirmOpen(false)
+                        void openPatchCheckSession(t)
+                      },
+                    },
+                    t('persistConfirmGo'),
                   ),
                 ),
               )
