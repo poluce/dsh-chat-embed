@@ -330,6 +330,7 @@ node scripts/release.mjs 0.6.7 --summary "..." --dry-run   # 只看计划
 
 | 版本 | 变化 |
 | --- | --- |
+| `0.6.12` | 修掉同一页面每次挂载加载两三次的问题：navigateGuest 每 350ms 重发 location.href，而 getURL() 在提交前一直是 about:blank，第二次赋值取消了正在进行的加载；改为加载中只等不重发，上限从 5 次尝试改为 20 秒期限（慢站点以前会直接判定失败）。另加 guest mounted / guest dropped 诊断日志 |
 | `0.6.11` | 补丁前的可写性判断从「不要尝试写入」改为「先执行，真被系统拒绝再给提权命令」：access(W_OK) 在 Windows 上可能误判，不该据此跳过尝试；并说明 DSH 授权弹窗与 Windows 提权是两条不同的闸 |
 | `0.6.10` | 修好「重启保持登录」整条链路：开关不再因 ctx 作用域错误静默失败、变成可双向切换（开启/还原）、设置菜单两行合一、预填任务说明重写；Host 半补上 inject 依赖，探针路由与 agent 工具终于生效 |
 | `0.6.9` | 设置菜单把「跨重启保持登录」与「检查补丁配置」合成一行（滑动开关 + 确认弹窗 + 新会话引导）；发版改用 OIDC Trusted Publishing，不再保存 npm 令牌，并附带 provenance |
