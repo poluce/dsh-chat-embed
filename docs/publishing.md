@@ -137,8 +137,8 @@ Get-FileHash $env:TEMP\check\dsh-chat-embed-<版本>.tgz -Algorithm SHA256
 | --- | --- |
 | 仓库 | <https://github.com/poluce/dsh-chat-embed> |
 | Release | <https://github.com/poluce/dsh-chat-embed/releases> |
-| 分发包 | `dsh-chat-embed-0.6.10.tgz`（16 个文件，约 70 kB） |
-| npm | `dsh-chat-embed@0.6.10`（<https://www.npmjs.com/package/dsh-chat-embed>，维护者 `poluce_auto`） |
+| 分发包 | `dsh-chat-embed-0.6.11.tgz`（16 个文件，约 70 kB） |
+| npm | `dsh-chat-embed@0.6.11`（<https://www.npmjs.com/package/dsh-chat-embed>，维护者 `poluce_auto`） |
 | 商店图标 | `assets/icon-180.png`（180×180 PNG） |
 | 商店截图 | `assets/screenshots/` + 仓库根 `screenshots.json`（6 张） |
 
@@ -157,7 +157,7 @@ dsh plugin --profile desktop add git+https://github.com/poluce/dsh-chat-embed.gi
 
 1. 注册账号并完成邮箱验证：<https://www.npmjs.com/signup>；
 2. 本机登录：`npm login`（浏览器确认或一次性密码；开了 2FA 输入验证码）；
-3. 发布：`npm publish`（`prepack` 自动跑门禁；包名 `dsh-chat-embed` 已发布 `0.6.10`）；
+3. 发布：`npm publish`（`prepack` 自动跑门禁；包名 `dsh-chat-embed` 已发布 `0.6.11`）；
 4. 使用者随后只需：`dsh plugin --profile desktop add dsh-chat-embed`。
 
 ## 发布前后检查项
