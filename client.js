@@ -103,7 +103,7 @@ window.__ModuleLoader__.load({
     let openRightTabImpl = () => {}
 
     /** Build identity, surfaced in the panel so a packaged app can be diagnosed. */
-    const BUILD = '0.6.8'
+    const BUILD = '0.6.9'
 
     /** Where a re-applied instance finds the one it must take over from. */
     const INSTANCE_KEY = '__DSH_CHAT_EMBED_INSTANCE__'

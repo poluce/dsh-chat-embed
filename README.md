@@ -330,6 +330,7 @@ node scripts/release.mjs 0.6.7 --summary "..." --dry-run   # 只看计划
 
 | 版本 | 变化 |
 | --- | --- |
+| `0.6.9` | 设置菜单把「跨重启保持登录」与「检查补丁配置」合成一行（滑动开关 + 确认弹窗 + 新会话引导）；发版改用 OIDC Trusted Publishing，不再保存 npm 令牌，并附带 provenance |
 | `0.6.8` | 去掉单提交策略：发版改为普通提交 + 普通推送，不再 --orphan 重写、reflog expire、gc --prune 与强推；恢复 git log/diff/blame/bisect，发版失败可 reset 回退，并为 OIDC provenance 扫清障碍 |
 | `0.6.7` | 发版脚本：一条命令完成 bump/gate/提交/推送/等 CI/发布/打 tag/建 release；新增 dependabot 自动维护固定 SHA 的 Action |
 | `0.6.6` | 元数据同步版：把 `engines.node` 收紧到 `>=22.14.0`、门禁脚本从 `prepublishOnly` 换成 `prepack`（同时覆盖 `npm pack` 与 `npm publish`）落到 npm 上；新增 CI 工作流（Node 22/24 跑门禁，并校验 tag 与 `BUILD` 一致）。无功能变化 |
