@@ -1645,6 +1645,14 @@ test('a pending patch asks the user to quit DSH from the tray', async () => {
     1,
     'the strip appears while the script waits for the exit',
   )
+  // It has to clear the tab bar: the pending state pins the tab bar open, and
+  // the tab bar owns the same top edge with a higher z-index, so a strip left on
+  // top:0 is covered by the very state it reports. That is exactly how the first
+  // click appeared to do nothing.
+  const pendingCss = instance.internals.CSS.match(/\.dce-status-bar\[data-patch-pending="true"\]\{[^}]*\}/)
+  assert.ok(pendingCss !== null, 'the pending strip has its own position')
+  assert.doesNotMatch(pendingCss[0], /top:0[;}]/, 'it does not sit under the tab bar')
+  assert.match(pendingCss[0], /z-index:5/, 'and it paints above the tab bar')
   assert.match(instance.internals.DICTS.zh.patchPendingHint, /托盘/, 'zh says where to quit')
   assert.match(instance.internals.DICTS.en.patchPendingHint, /tray/, 'en says where to quit')
 })

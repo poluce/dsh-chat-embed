@@ -2943,6 +2943,10 @@ let activeCtx = undefined
       '.dce-icon-button:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
       '.dce-icon-button:focus-visible{outline:2px solid var(--dsw-alias-button-primary-fill,#4c6ef5);outline-offset:-2px}',
       '.dce-status-bar{position:absolute;top:0;left:0;right:0;z-index:2;display:flex;align-items:center;gap:8px;box-sizing:border-box;padding:4px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.18));background:var(--dsw-alias-bg-base,#fff);font-size:12px}',
+      // A pending patch keeps the tab bar pinned open, and the tab bar sits on
+      // the same top edge with a higher z-index — so the strip has to move below
+      // it or it is hidden by the very state it is reporting.
+      '.dce-status-bar[data-patch-pending="true"]{top:33px;z-index:5;}',
       '.dce-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-label-tertiary,#9aa0a6)}',
       '.dce-dot[data-phase="ready"]{background:var(--dsw-alias-state-success-primary,#2ea043)}',
       '.dce-dot[data-phase="failed"]{background:var(--dsw-alias-state-error-primary,#d33)}',
