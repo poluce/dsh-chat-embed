@@ -83,5 +83,8 @@ jobs:
         run: npm run check
 
       # 刻意不设 NODE_AUTH_TOKEN / NPM_TOKEN：OIDC 模式下残留令牌会干扰认证。
+      #
+      # --loglevel=verbose 是必要的：npm 的 OIDC 换取失败时**不会抛错**，只写一条
+      # verbose 日志就继续用空凭证发布，最后只剩一句 ENEEDAUTH，看不出真正原因。
       - name: Publish
-        run: npm publish --provenance
+        run: npm publish --provenance --loglevel=verbose
