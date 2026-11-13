@@ -1460,8 +1460,10 @@ test('the draft prompt carries the known facts so the agent starts from them', a
   assert.match(prompt, /D:\\DSH\\resources/, 'the install directory is already known')
   assert.match(prompt, /已开启/, 'the panel state is already known')
   assert.match(prompt, /补丁命令/, 'the command is included')
-  assert.match(prompt, /已经同意开启/, 'the prompt is an instruction to act, not a request to diagnose')
-  assert.match(prompt, /只动 app\.asar/, 'the change is scoped to the shell archive')
+  assert.match(prompt, /^任务：/, 'the draft is a task handed to the agent, not the user speaking')
+  assert.doesNotMatch(prompt, /我已经同意/, 'the agent is not addressed as if it were the requester')
+  assert.match(prompt, /判定状态/, 'the agent is told how to decide what to do')
+  assert.match(prompt, /改动范围仅限 app\.asar/, 'the change is scoped to the shell archive')
   assert.doesNotMatch(prompt, /\{facts\}/, 'the placeholder was substituted')
 })
 
@@ -1506,7 +1508,7 @@ test('the prompt survives a Host that answers nothing', async () => {
 
   const prompt = instance.internals.buildPatchPrompt(t, undefined)
   assert.match(prompt, /dsh_chat_embed_patch_check/, 'the agent is still told what to call')
-  assert.match(prompt, /其它文件一律不要改/, 'the scope guard survives an absent probe')
+  assert.match(prompt, /其它文件不要动/, 'the scope guard survives an absent probe')
   assert.doesNotMatch(prompt, /undefined/, 'an absent probe does not leak "undefined" into the draft')
   assert.doesNotMatch(prompt, /\{facts\}/, 'the facts block is always substituted')
 })
