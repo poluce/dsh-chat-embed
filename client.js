@@ -279,20 +279,15 @@ let activeCtx = undefined
         persistConfirmNote: 'Continuing opens a new session containing the task and the known facts; sending it lets the agent apply the patch and hand you the elevated command if permissions block it.',
         persistConfirmGo: 'Continue',
         persistConfirmCancel: 'Cancel',
+        persistOnTitle: 'Logins already survive restarts',
+        persistOnBody: 'Nothing to do. If a restart ever asks you to sign in again, open this switch once more and it will check whether a shell update replaced the patch.',
         patchNoWorkspace: 'This composition has no Session service; the patch instructions were copied to the clipboard.',
-        patchPromptPlugin: 'Plugin',
-        patchPrompt:
-          'Task: enable "logins survive a restart" for the DSH desktop app.\n\nBackground: the desktop shell uses a fresh in-memory partition on every launch, so the embedded chat logins cannot survive a restart. An optional patch rewrites app.asar to pin a persistent partition name; it is reversible and the original is kept as app.asar.orig.\n\nKnown facts (just probed by the plugin; confirm with the dsh_chat_embed_patch_check tool when it exists, otherwise read the filesystem):\n{facts}\n\nFollow this decision table; do not skip steps:\n\nA. patched=yes and patch site=present\n   Already working - change no file. writable=no does not matter here; just warn that after the next shell update overwrites the patch it must be re-applied with administrator rights.\n\nB. patched=no or lost, and patch site=present\n   - writable=yes: run the patch command exactly as given (it already names the right Node runtime and install directory).\n   - writable=no: do not attempt the write - it fails halfway on permissions and leaves a stray app.asar.new. Output the exact command that needs administrator rights and how to open an elevated terminal.\n\nC. patch site=absent\n   This shell version has no patchable site, so the patch does not apply. Explain why; do not attempt another approach.\n\nAlso:\n1. "writable" comes from access(W_OK) and can be wrong on Windows ACLs; before any real write, create and delete a temporary file in the resources directory to confirm.\n2. Check the byte verification the script prints; the app.asar swap must happen only after DSH has fully quit.\n3. Never escalate privileges yourself.\n4. Change only app.asar and app.asar.orig; touch nothing else.\n5. Finish with the current state, what was done, and what the user should do next (usually restart DSH and reopen the settings menu).',
-        patchYes: 'yes',
-        patchNo: 'no',
-        patchPresent: 'present',
-        patchMissing: 'missing (shell version mismatch)',
-        patchUnknown: 'unknown',
-        patchWritable: 'writable',
-        patchSiteLabel: 'patch site',
-        patchApplied: 'already patched',
-        patchCommandLabel: 'Patch command:',
-        patchDetail: 'Note',
+        patchTask: 'Apply the DSH desktop shell patch that keeps embedded chat logins across restarts.',
+        patchTaskDir: 'Install directory',
+        patchTaskCommand: 'Command',
+        patchTaskReadonly: 'The install directory is not writable: do not attempt the write, just give me the command to run with administrator rights.',
+        patchTaskNoSite: 'This shell version has no patch site, so the patch does not apply — explain why and change nothing else.',
+        patchTaskVerify: 'When it is done, tell me how to verify (restart DSH, reopen the settings menu).',
         copyDiag: 'Copy diagnostics',
         copied: 'Copied',
         copyFailed: 'Copy failed',
@@ -374,20 +369,15 @@ let activeCtx = undefined
         persistConfirmNote: '点击「继续」会打开一个新会话，里面是给它的任务说明和已知事实；发送后由它完成补丁操作，遇到权限问题会给出需要提权的命令。',
         persistConfirmGo: '继续',
         persistConfirmCancel: '取消',
+        persistOnTitle: '重启保持登录已开启',
+        persistOnBody: '登录态会跨重启保留，不需要再操作。如果某次重启后仍要重新登录，再点这个开关，它会检查补丁是不是被桌面壳升级覆盖了。',
         patchNoWorkspace: '当前拼装没有会话服务，补丁说明已复制到剪贴板。',
-        patchPromptPlugin: '插件',
-        patchPrompt:
-          '任务：为 DSH 桌面版开启「跨重启保持登录」。\n\n背景：桌面壳默认每次启动都使用新的内存分区，内嵌聊天的登录态因此无法跨重启保留。可选补丁会改写 app.asar，把分区名固定为持久化分区；补丁可回滚，原档保留为 app.asar.orig。\n\n已知事实（插件刚探测所得；有 dsh_chat_embed_patch_check 工具就用它复核，没有就直接读文件系统）：\n{facts}\n\n按下面的判定表处理，不要跳步：\n\nA. 已打补丁=是 且 补丁点=存在\n   功能已就绪，不要改动任何文件。「可写=否」此时不影响功能，只需要提醒一句：下次桌面壳升级覆盖补丁后，要以管理员权限重打。\n\nB. 已打补丁=否 或 已失效，且 补丁点=存在\n   · 可写=是：原样执行「补丁命令」（已含正确的 Node 运行时与安装目录）。\n   · 可写=否：不要尝试写入——会因权限半途失败并留下 app.asar.new 残档。直接给出需要管理员权限执行的确切命令，并说明怎么以管理员身份打开终端。\n\nC. 补丁点=不存在\n   当前桌面壳版本不含可替换代码点，补丁不适用。说明原因即可，不要尝试别的改法。\n\n其它要求：\n1. 「可写」是插件用 access(W_OK) 判断的，Windows 上受 ACL 影响可能误判；真需要写之前，先在 resources 目录建一个临时文件再删除，实测确认。\n2. 执行补丁后核对脚本给出的逐字节校验结果；替换 app.asar 必须在 DSH 完全退出后进行。\n3. 不要自行提权。\n4. 改动范围仅限 app.asar 与 app.asar.orig，其它文件不要动。\n5. 结束时说明：当前状态、做了什么、用户下一步要做什么（通常是重启 DSH 后回到设置菜单查看）。',
-        patchYes: '是',
-        patchNo: '否',
-        patchPresent: '存在',
-        patchMissing: '不存在（壳版本不匹配）',
-        patchUnknown: '未知',
-        patchWritable: '可写',
-        patchSiteLabel: '补丁点',
-        patchApplied: '已打补丁',
-        patchCommandLabel: '补丁命令:',
-        patchDetail: '说明',
+        patchTask: '给 DSH 桌面版打上「跨重启保持登录」补丁。',
+        patchTaskDir: '安装目录',
+        patchTaskCommand: '命令',
+        patchTaskReadonly: '安装目录不可写：不要尝试写入，把需要管理员权限执行的命令给我。',
+        patchTaskNoSite: '当前桌面壳版本找不到补丁点，补丁不适用——说明原因即可，不要改别的。',
+        patchTaskVerify: '打好后告诉我怎么验证（重启 DSH，回设置菜单看状态）。',
         copyDiag: '复制诊断信息',
         copied: '已复制',
         copyFailed: '复制失败',
@@ -2639,34 +2629,20 @@ let activeCtx = undefined
      * @returns {string}
      */
     function buildPatchPrompt(t, probe) {
-      const facts = []
-      facts.push(t('patchPromptPlugin') + ': dsh-chat-embed ' + BUILD)
-      facts.push(t('persistLabel') + ': ' + persistenceText(t, persistenceState()))
-      if (probe !== undefined && probe !== null) {
-        const row = (label, value) => {
-          if (value === undefined || value === null || value === '') return
-          facts.push(label + ': ' + String(value))
-        }
-        row('resources', probe.resources)
-        row('app.asar', probe.asar)
-        row('app.asar.orig', probe.backup === true ? t('patchYes') : t('patchNo'))
-        row(t('patchWritable'), probe.writable === true ? t('patchYes') : t('patchNo'))
-        row(
-          t('patchSiteLabel'),
-          probe.patchSite === true ? t('patchPresent') : probe.patchSite === false ? t('patchMissing') : t('patchUnknown'),
-        )
-        row(
-          t('patchApplied'),
-          probe.patched === true ? t('patchYes') : probe.patched === false ? t('patchNo') : t('patchUnknown'),
-        )
-        if (typeof probe.patchCommand === 'string' && probe.patchCommand !== '') {
-          facts.push('')
-          facts.push(t('patchCommandLabel'))
-          facts.push(probe.patchCommand)
-        }
-        if (typeof probe.detail === 'string' && probe.detail !== '') facts.push(t('patchDetail') + ': ' + probe.detail)
+      const info = probe !== undefined && probe !== null ? probe : {}
+      // The plugin already knows the state; the draft only says what to do about
+      // it. Anything the patch script enforces itself (byte checks, quitting
+      // first) does not belong here — that is a manual, not an instruction.
+      const lines = [t('patchTask')]
+      const command = typeof info.patchCommand === 'string' && info.patchCommand !== '' ? info.patchCommand : ''
+      if (typeof info.resources === 'string' && info.resources !== '') {
+        lines.push('', t('patchTaskDir') + ': ' + info.resources)
       }
-      return fill(t('patchPrompt'), { facts: facts.join('\n') })
+      if (command !== '') lines.push('', t('patchTaskCommand') + ':', '  ' + command)
+      if (info.writable === false) lines.push('', t('patchTaskReadonly'))
+      if (info.patchSite === false) lines.push('', t('patchTaskNoSite'))
+      lines.push('', t('patchTaskVerify'))
+      return lines.join('\n')
     }
 
     /** @returns {{ state: string, detail: string, seats: any[] }} */
@@ -3316,6 +3292,7 @@ let activeCtx = undefined
       const [menuOpen, setMenuOpen] = React.useState(false)
       const [confirmOpen, setConfirmOpen] = React.useState(false)
       const [confirmError, setConfirmError] = React.useState('')
+      const [noticeOpen, setNoticeOpen] = React.useState(false)
 
       /**
        * Close the settings menu.
@@ -3575,9 +3552,12 @@ let activeCtx = undefined
                     title: t('persistCheckHint'),
                     disabled: patchCheck.running,
                     onClick: () => {
-                        log('info', 'dialog: opened by the restart-login switch')
+                      log('info', 'dialog: opened by the restart-login switch')
                       closeMenu()
-                      setConfirmOpen(true)
+                      // Already on means there is nothing to hand an agent: a task Session
+                      // here would ask it to apply a patch that is already applied.
+                      if (persistenceState() === 'on') setNoticeOpen(true)
+                      else setConfirmOpen(true)
                     },
                   }),
                 ),
@@ -3671,6 +3651,32 @@ let activeCtx = undefined
                       },
                     },
                     t('persistConfirmGo'),
+                  ),
+                ),
+              )
+            : null,
+          noticeOpen
+            ? h('div', { className: 'dce-confirm-scrim', onPointerDown: () => setNoticeOpen(false) })
+            : null,
+          noticeOpen
+            ? h(
+                'div',
+                {
+                  className: 'dce-card',
+                  role: 'dialog',
+                  'aria-modal': 'true',
+                  'data-modal': 'true',
+                  'aria-label': t('persistOnTitle'),
+                },
+                h('div', { className: 'dce-card-title' }, t('persistOnTitle')),
+                h('div', { className: 'dce-card-body' }, t('persistOnBody')),
+                h(
+                  'div',
+                  { className: 'dce-card-actions' },
+                  h(
+                    'button',
+                    { type: 'button', className: 'dce-button dce-button-primary', onClick: () => setNoticeOpen(false) },
+                    t('dismiss'),
                   ),
                 ),
               )

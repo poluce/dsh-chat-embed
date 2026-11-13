@@ -1439,7 +1439,7 @@ test('the patch instructions use the command the Host resolved', async () => {
   assert.match(text, /patch-asar\.cjs build/)
 })
 
-test('the draft prompt carries the known facts so the agent starts from them', async () => {
+test('the draft is the action, not a manual', async () => {
   const instance = await createInstance({ shell: createFakeShell() })
   attachSurface(instance)
   const record = await openTab(instance, 'deepseek')
@@ -1456,16 +1456,15 @@ test('the draft prompt carries the known facts so the agent starts from them', a
     patchCommand: '"D:\\nodejs\\node.exe" C:\\pkg\\patch-asar.cjs build --resources D:\\DSH\\resources',
   })
 
-  assert.match(prompt, /dsh_chat_embed_patch_check/, 'the agent is told which tool to call')
-  assert.match(prompt, /D:\\DSH\\resources/, 'the install directory is already known')
-  assert.match(prompt, /已开启/, 'the panel state is already known')
-  assert.match(prompt, /补丁命令/, 'the command is included')
-  assert.match(prompt, /^任务：/, 'the draft is a task handed to the agent, not the user speaking')
-  assert.doesNotMatch(prompt, /我已经同意/, 'the agent is not addressed as if it were the requester')
-  assert.match(prompt, /判定表/, 'the agent is told how to decide what to do')
-  assert.match(prompt, /可写=否/, 'the unwritable install directory has its own branch')
-  assert.match(prompt, /改动范围仅限 app\.asar/, 'the change is scoped to the shell archive')
-  assert.doesNotMatch(prompt, /\{facts\}/, 'the placeholder was substituted')
+  // The plugin already did the diagnosis. The draft is the action, not a manual:
+  // four lines of work, no state table for the agent to re-derive.
+  assert.equal(prompt.split('\n')[0], '给 DSH 桌面版打上「跨重启保持登录」补丁。', 'it opens with the action')
+  assert.match(prompt, /D:\\DSH\\resources/, 'the install directory is handed over')
+  assert.match(prompt, /patch-asar\.cjs build/, 'the command is handed over')
+  assert.match(prompt, /不可写/, 'the unwritable directory is called out')
+  assert.doesNotMatch(prompt, /dsh_chat_embed_patch_check/, 'no tool name to look up — the draft stands alone')
+  assert.doesNotMatch(prompt, /\{facts\}/, 'no placeholder survives')
+  assert.ok(prompt.split('\n').length <= 12, 'four facts and blanks, nothing to read twice: ' + prompt.split('\n').length + ' lines')
 })
 
 test('the settings menu keeps no self-check result in its own state', async () => {
@@ -1508,34 +1507,26 @@ test('the prompt survives a Host that answers nothing', async () => {
   const t = (key) => instance.internals.DICTS.zh[key] ?? key
 
   const prompt = instance.internals.buildPatchPrompt(t, undefined)
-  assert.match(prompt, /dsh_chat_embed_patch_check/, 'the agent is still told what to call')
-  assert.match(prompt, /其它文件不要动/, 'the scope guard survives an absent probe')
-  assert.doesNotMatch(prompt, /undefined/, 'an absent probe does not leak "undefined" into the draft')
-  assert.doesNotMatch(prompt, /\{facts\}/, 'the facts block is always substituted')
+  assert.equal(prompt.split('\n')[0], '给 DSH 桌面版打上「跨重启保持登录」补丁。', 'the action still leads')
+  assert.match(prompt, /怎么验证/, 'the closing instruction survives')
+  assert.doesNotMatch(prompt, /undefined/, 'an absent probe does not leak into the draft')
+  assert.doesNotMatch(prompt, /安装目录:/, 'no empty directory line is invented')
+  assert.doesNotMatch(prompt, /命令:/, 'no empty command block is invented')
 })
 
-test('the prompt states the local verdict and folds in the host probe', async () => {
+test('the prompt reflects the probe instead of restating it', async () => {
   const instance = await createInstance({ shell: createFakeShell() })
   attachSurface(instance)
-  const record = await openTab(instance, 'deepseek')
-  record.partition = 'persist:dsh-sidebar-abc'
-
   const t = (key) => instance.internals.DICTS.zh[key] ?? key
 
-  const withoutProbe = instance.internals.buildPatchPrompt(t, undefined)
-  assert.match(withoutProbe, /已开启/, 'the local verdict is stated')
+  const shell = { resources: 'D:\\DSH\\resources', patchCommand: 'node patch-asar.cjs build' }
+  const healthy = instance.internals.buildPatchPrompt(t, { ...shell, patchSite: true, patched: true, writable: true })
+  assert.doesNotMatch(healthy, /不可写/, 'a writable directory is not mentioned')
+  assert.doesNotMatch(healthy, /找不到补丁点/, 'a present patch site is not mentioned')
 
-  const withProbe = instance.internals.buildPatchPrompt(t, {
-    resources: 'D:\\DSH\\resources',
-    asar: 'D:\\DSH\\resources\\app.asar',
-    backup: true,
-    staged: false,
-    writable: true,
-    patchSite: true,
-    patched: true,
-    node: 'v22.0.0',
-  })
-  assert.match(withProbe, /D:\\DSH\\resources/, 'the host facts reach the draft')
-  assert.match(withProbe, /已打补丁: 是/, 'the patch verdict is stated')
-  assert.match(withProbe, /可写: 是/, 'write access is stated')
+  const blocked = instance.internals.buildPatchPrompt(t, { ...shell, patchSite: true, patched: false, writable: false })
+  assert.match(blocked, /不可写/, 'an unwritable directory changes what the agent may do')
+
+  const noSite = instance.internals.buildPatchPrompt(t, { ...shell, patchSite: false })
+  assert.match(noSite, /找不到补丁点/, 'an absent patch site is reported as inapplicable')
 })
