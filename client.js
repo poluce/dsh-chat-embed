@@ -3549,11 +3549,17 @@ let activeCtx = undefined
                       setConfirmScript(undefined)
                       setConfirmOpen(true)
                       void fetchProbe().then((probe) => {
-                        const launcher =
-                          probe !== undefined && probe !== null && typeof probe.launcher === 'string'
-                            ? probe.launcher
-                            : ''
-                        setConfirmScript(launcher)
+                        const info = probe !== undefined && probe !== null ? probe : {}
+                        // The launcher is what a user double-clicks; a platform
+                        // without one still gets the script, which is the same
+                        // thing with one command in front of it.
+                        const shown =
+                          typeof info.launcher === 'string' && info.launcher !== ''
+                            ? info.launcher
+                            : typeof info.script === 'string' && info.script !== ''
+                              ? info.script
+                              : ''
+                        setConfirmScript(shown)
                         notify()
                       })
                     },

@@ -17,7 +17,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs'
+import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -163,17 +163,51 @@ function readAsarEntry(file, entry) {
 }
 
 /**
- * The launcher the user double-clicks, and the command line that does the same
- * thing in a terminal. Both end up in the same script; the launcher adds a
- * window that stays open and finds Node by itself.
+ * The command line for one direction of the patch.
+ *
+ * The launcher is what a user double-clicks: it opens a window that stays open
+ * and finds Node by itself. Windows and macOS ship one; every other platform
+ * gets the equivalent `node <script>` line, because the script itself is
+ * platform-neutral and there is no desktop build to point at.
  *
  * @param {'apply' | 'revert'} action
- * @param {string} [launcher] absolute path to the platform launcher
+ * @param {{ launcher?: string, script?: string }} files
+ * @param {string} [nodeBinary] path to a Node binary, for the fallback
  * @returns {string | undefined}
  */
-function launcherCommand(action, launcher) {
-  if (typeof launcher !== 'string' || launcher === '') return undefined
-  return launcher.includes(' ') ? '"' + launcher + '" ' + action : launcher + ' ' + action
+function launcherCommand(action, files, nodeBinary) {
+  const quote = (value) => (value.includes(' ') ? '"' + value + '"' : value)
+  if (typeof files.launcher === 'string' && files.launcher !== '') return quote(files.launcher) + ' ' + action
+  if (typeof files.script !== 'string' || files.script === '') return undefined
+  const node =
+    typeof nodeBinary === 'string' && nodeBinary !== '' ? quote(nodeBinary) : 'node'
+  return node + ' ' + quote(files.script) + ' ' + action
+}
+
+/**
+ * Locate a Node binary for the non-desktop fallback. The desktop app ships its
+ * own runtime under `dsh-runtimes`; a plain install just uses PATH.
+ *
+ * @returns {string | undefined}
+ */
+function findNodeBinary() {
+  const candidates = []
+  if (typeof process.execPath === 'string' && /node(\.exe)?$/i.test(process.execPath)) candidates.push(process.execPath)
+  const home = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== '' ? process.env.DSH_HOME : join(homedir(), '.dsh')
+  const runtimes = join(home, 'dsh-runtimes')
+  try {
+    for (const entry of readdirSync(runtimes)) {
+      candidates.push(join(runtimes, entry, 'dependencies', 'node', 'bin', 'node'))
+    }
+  } catch (error) {
+    void error
+  }
+  if (process.platform === 'win32' && process.env.ProgramFiles !== undefined) {
+    candidates.push(join(process.env.ProgramFiles, 'nodejs', 'node.exe'))
+  } else {
+    candidates.push('/usr/local/bin/node', '/usr/bin/node')
+  }
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate !== '' && existsSync(candidate))
 }
 
 /**
@@ -284,10 +318,12 @@ function inspectShell(resources) {
   // is what the user double-clicks; it finds Node on its own, so the panel never
   // has to talk about runtimes.
   const files = findPatchFiles()
+  const node = findNodeBinary()
   report.script = files.script
   report.launcher = files.launcher
-  report.applyCommand = launcherCommand('apply', files.launcher)
-  report.revertCommand = launcherCommand('revert', files.launcher)
+  report.nodeBinary = node
+  report.applyCommand = launcherCommand('apply', files, node)
+  report.revertCommand = launcherCommand('revert', files, node)
   return report
 }
 

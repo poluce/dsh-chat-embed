@@ -134,22 +134,51 @@ test('the probe calls out a shell whose patch site is gone', () => {
   assert.match(report.detail, /补丁点不存在/)
 })
 
-test('the probe names the script and both directions', () => {
+test('the probe names the script and a command for each direction', () => {
   const resources = fakeInstall({ 'lib/main.js': PATCHED_MAIN })
   const report = internals.inspectShell(resources)
 
-  assert.ok(typeof report.launcher === 'string' && report.launcher !== '', 'the launcher ships with the package')
-  assert.match(report.launcher, /shell-patch\.(cmd|command)$/, 'the platform launcher is picked')
   assert.ok(typeof report.script === 'string' && report.script.endsWith('shell-patch.mjs'), 'the script is located')
   assert.ok(report.applyCommand.includes('apply'), 'the on direction is one command')
   assert.ok(report.revertCommand.includes('revert'), 'the off direction is one command')
-  assert.equal(report.nodeBinary, undefined, 'no Node binary to worry about: the launcher finds its own')
+  // Windows and macOS get a double-clickable launcher; every other platform
+  // points at the script itself, because the desktop build is the only thing
+  // that ships one.
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    assert.ok(typeof report.launcher === 'string' && report.launcher !== '', 'the launcher ships with the package')
+    assert.match(report.launcher, /shell-patch\.(cmd|command)$/, 'the platform launcher is picked')
+    assert.ok(report.applyCommand.startsWith('"') || !report.applyCommand.split(' ')[0].includes(' '), 'a spaced path is quoted')
+  } else {
+    assert.equal(report.launcher, undefined, 'no desktop launcher on this platform')
+    assert.match(report.applyCommand, /shell-patch\.mjs apply$/, 'the script is called directly instead')
+  }
 })
 
-test('the launcher command quotes a path that contains spaces', () => {
-  assert.equal(internals.launcherCommand('apply', 'C:\\Program Files\\shell-patch.cmd'), '"C:\\Program Files\\shell-patch.cmd" apply')
-  assert.equal(internals.launcherCommand('revert', 'C:\\pkg\\shell-patch.cmd'), 'C:\\pkg\\shell-patch.cmd revert')
-  assert.equal(internals.launcherCommand('apply', undefined), undefined, 'no launcher, no command')
+test('a command quotes a path that contains spaces', () => {
+  assert.equal(
+    internals.launcherCommand('apply', { launcher: 'C:\\Program Files\\shell-patch.cmd' }, undefined),
+    '"C:\\Program Files\\shell-patch.cmd" apply',
+  )
+  assert.equal(
+    internals.launcherCommand('revert', { launcher: 'C:\\pkg\\shell-patch.cmd' }, undefined),
+    'C:\\pkg\\shell-patch.cmd revert',
+  )
+})
+
+test('without a launcher the command falls back to node and the script', () => {
+  const files = { script: '/opt/dsh/shell-patch.mjs' }
+  assert.equal(internals.launcherCommand('apply', files, '/usr/bin/node'), '/usr/bin/node /opt/dsh/shell-patch.mjs apply')
+  assert.equal(
+    internals.launcherCommand('revert', { script: '/my pkg/shell-patch.mjs' }, '/usr/bin/node'),
+    '/usr/bin/node "/my pkg/shell-patch.mjs" revert',
+    'a spaced script path is quoted',
+  )
+  assert.equal(internals.launcherCommand('apply', {}, undefined), undefined, 'nothing to run, no command')
+})
+
+test('a launcher wins over the node fallback when both exist', () => {
+  const files = { launcher: 'C:\\pkg\\shell-patch.cmd', script: 'C:\\pkg\\shell-patch.mjs' }
+  assert.equal(internals.launcherCommand('apply', files, 'C:\\nodejs\\node.exe'), 'C:\\pkg\\shell-patch.cmd apply')
 })
 
 test('a backup that is itself patched is reported as such', () => {
