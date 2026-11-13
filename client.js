@@ -210,6 +210,8 @@ let activeCtx = undefined
     /** The first `dom-ready` can beat the shell's lease registration. */
     const NAVIGATE_RETRY_MS = 350
     const NAVIGATE_MAX_ATTEMPTS = 5
+    /** How long a mount may wait for the site to commit before failing. */
+    const NAVIGATE_TIMEOUT_MS = 20000
 
     /**
      * How long to wait after an OAuth roundtrip lands back on the site before
@@ -1167,7 +1169,11 @@ let activeCtx = undefined
     }
 
     /** @param {GuestRecord} record */
-    function dropGuest(record) {
+    /**
+     * @param {GuestRecord} record
+     * @param {string} [reason] why this guest is being torn down
+     */
+    function dropGuest(record, reason) {
       const element = record.element
       const lease = record.lease
       const handlers = record.handlers
@@ -1186,6 +1192,12 @@ let activeCtx = undefined
       record.selfTest = ''
       // `oauthBlocked` is deliberately kept: the explanation must survive the
       // recovery reload that replaces the stuck guest.
+
+      if (element !== undefined && element !== null) {
+        let owner = 'unknown'
+        for (const [id, candidate] of guests) if (candidate === record) owner = id
+        log('info', 'guest dropped', { provider: owner, reason: reason === undefined ? 'unspecified' : reason })
+      }
 
       if (record.reloadTimer !== undefined) {
         try {
@@ -1263,6 +1275,24 @@ let activeCtx = undefined
         return typeof url === 'string' ? url : ''
       } catch (error) {
         return ''
+      }
+    }
+
+    /**
+     * Whether the guest is still loading a document.
+     *
+     * `location.href` must not be reassigned while this is true: a second assign
+     * cancels the navigation in flight and the page starts from zero.
+     *
+     * @param {any} element
+     * @returns {boolean | undefined} undefined when the shell offers no answer
+     */
+    function guestLoading(element) {
+      if (element === undefined || element === null || typeof element.isLoading !== 'function') return undefined
+      try {
+        return element.isLoading() === true
+      } catch (error) {
+        return undefined
       }
     }
 
@@ -1383,6 +1413,9 @@ let activeCtx = undefined
         record.navigated = false
         record.handlers = handlers
         record.mounts += 1
+        // A mount is a fresh document load. Printing the count makes "one page
+        // in the tab" distinguishable from "the tab was rebuilt" in the ring.
+        log('info', 'guest mounted', { provider: id, mount: record.mounts })
 
         try {
           layer.appendChild(element)
@@ -1423,22 +1456,34 @@ let activeCtx = undefined
       const provider = findProvider(id)
       if (provider === undefined) return
       const record = guestRecord(id)
+      const target = startUrlFor(provider)
+      const deadline = Date.now() + NAVIGATE_TIMEOUT_MS
+      let issued = 0
 
-      for (let attempt = 0; attempt < NAVIGATE_MAX_ATTEMPTS; attempt += 1) {
+      while (Date.now() < deadline) {
         if (element !== record.element) return
+        const landed = guestUrl(element)
+        if (isLiveUrl(landed)) {
+          if (landed !== '') lastUrls.set(id, landed)
+          setPhase(id, PHASE.READY, '')
+          return
+        }
+        const loading = guestLoading(element)
+        // Assigning location.href while a navigation is already running cancels
+        // it and starts over: that is what made every mount load the page two or
+        // three times. Wait for the one in flight instead of restarting it.
+        if (loading === true) {
+          await delay(NAVIGATE_RETRY_MS)
+          continue
+        }
+        if (issued >= NAVIGATE_MAX_ATTEMPTS) break
+        issued += 1
         try {
-          await element.executeJavaScript('location.href = ' + JSON.stringify(startUrlFor(provider)) + ';')
+          await element.executeJavaScript('location.href = ' + JSON.stringify(target) + ';')
         } catch (error) {
           // The guest document is not executing yet; keep trying.
         }
         await delay(NAVIGATE_RETRY_MS)
-        if (element !== record.element) return
-        const landed = guestUrl(element)
-        if (isLiveUrl(landed)) {
-          if (typeof landed === 'string' && landed !== '') lastUrls.set(id, landed)
-          setPhase(id, PHASE.READY, '')
-          return
-        }
       }
       if (element !== record.element) return
       setPhase(id, PHASE.FAILED, 'navigation-timeout')
@@ -1735,10 +1780,11 @@ let activeCtx = undefined
       await mountGuest(id)
     }
     /** Release every guest; used on plugin unload. */
-    function destroyGuests() {
+    /** @param {string} [reason] */
+    function destroyGuests(reason) {
       for (const [id, record] of guests) {
         record.generation += 1
-        dropGuest(record)
+        dropGuest(record, reason)
         setPhase(id, PHASE.IDLE, '')
         if (record.layer !== undefined && record.layer !== null) {
           try {
@@ -1856,7 +1902,7 @@ let activeCtx = undefined
       const chosen = seat === undefined ? null : inlineHosts[seat]
       if (chosen !== state.surface.host) log('info', 'host resolved', { seat: seat === undefined ? 'none' : seat })
       setHost(chosen)
-      if (chosen === null) destroyGuests()
+      if (chosen === null) destroyGuests('no viewport')
       else {
         dropGuestsOutside(chosen)
         void ensureActiveGuest()

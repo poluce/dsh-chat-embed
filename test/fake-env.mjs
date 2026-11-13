@@ -141,7 +141,9 @@ export function createFakeDocument(options = {}) {
       if (node.tagName === 'WEBVIEW') {
         node.url = ''
         node.executed = []
+        node.loading = false
         node.getURL = () => node.url
+        node.isLoading = () => node.loading
         node.executeJavaScript = (code) => {
           node.executed.push(code)
           if (webviewOptions.autoNavigate !== false) {

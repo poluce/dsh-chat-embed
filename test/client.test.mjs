@@ -305,6 +305,39 @@ test('each tab navigates to its own service URL', async () => {
   assert.equal(doubao.element.executed[0], 'location.href = "https://www.doubao.com/chat/";')
 })
 
+test('a navigation in flight is never restarted', async () => {
+  const shell = createFakeShell()
+  const instance = await createInstance({ shell })
+  attachSurface(instance)
+
+  const record = await openTab(instance, 'deepseek')
+  // Record the assignment without letting the fake land, so the test controls
+  // when the document commits — the way a real network does.
+  const issued = []
+  record.element.executeJavaScript = (code) => {
+    issued.push(code)
+    return Promise.resolve(true)
+  }
+  record.element.fire('dom-ready')
+
+  // The page is now fetching its first byte: getURL() still returns about:blank
+  // and the guest reports loading. Reassigning location.href here would cancel
+  // the request and start it over, which is what made every mount look like it
+  // loaded the page two or three times.
+  record.element.loading = true
+  await new Promise((resolve) => setTimeout(resolve, 1200))
+
+  assert.equal(issued.length, 1, 'the navigation must be issued once')
+  assert.equal(issued[0], 'location.href = "https://chat.deepseek.com/";')
+  assert.equal(guestOf(instance, 'deepseek').phase, 'navigating')
+
+  // The document commits and the tab becomes ready.
+  record.element.url = 'https://chat.deepseek.com/'
+  record.element.loading = false
+  await waitFor(() => guestOf(instance, 'deepseek').phase === 'ready', 3000)
+  assert.equal(issued.length, 1, 'landing must not trigger another navigation')
+})
+
 test('navigation gives up for a tab that never leaves about:blank', async () => {
   const shell = createFakeShell()
   const instance = await createInstance({ shell })
