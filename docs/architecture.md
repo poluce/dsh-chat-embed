@@ -113,7 +113,7 @@ HttpOnly 对 guest 页面的 `document.cookie` 不可见，而插件只拿到 `<
 
 ### 5.2 壳补丁（`tools/shell-patch/`）
 
-`patch-asar.cjs` 改 `resources/app.asar` 里 `lib/main.js` 的两处：
+`shell-patch.mjs` 改 `resources/app.asar` 里 `lib/main.js` 的两处：
 
 ```js
 // 1) 稳定、持久的分区名
@@ -131,11 +131,27 @@ this.configureSession(session.fromPartition(partition, { cache: false }))
 | 跨重启登录 | ✅ 首次重启需登录一次，之后免登录 |
 | 单次启动写入 | ≈13 MB → ≈0.09 MB（`Cache` 零新增，`Code Cache` 约 0.02 MB） |
 | 副作用 | 壳自带右侧栏浏览器也变成持久分区 |
-| 升级风险 | 客户端升级会覆盖 `app.asar`，**必须重打**；`restore-shell-patch.cmd` 可还原 |
+| 升级风险 | 客户端升级会覆盖 `app.asar`，**必须重打**；同一个脚本的「关闭」可还原 |
 
 > 补丁丢失时插件行为不变，只是回到"每次重启重新登录"。
 >
-> 插件侧只能**检测**补丁是否存在：guest 拿到的分区以 `persist:` 开头即已开启，否则是内存分区；结果记进 `localStorage['dsh-chat-embed:persist']`，设置菜单在重启后立即显示该状态。壳在 `acquire(workspace)` 里只接收 workspace，分区名由主进程决定，渲染进程没有任何接口能在运行时切换，所以菜单里只有状态与「复制补丁说明」，没有可点的开关。
+> 插件侧只能**检测**补丁是否存在：guest 拿到的分区以 `persist:` 开头即已开启，否则是内存分区；结果记进 `localStorage['dsh-chat-embed:persist']`，设置菜单在重启后立即显示该状态。壳在 `acquire(workspace)` 里只接收 workspace，分区名由主进程决定，渲染进程没有任何接口能在运行时切换——所以开关只能**把用户导向脚本**，点开确认框给出该双击的文件，点「复制命令」把路径和命令复制走。
+
+#### 5.2.1 为什么是一个脚本而不是一串手工步骤
+
+补丁是幂等的、可校验的、可反向的，所以没有必要把它拆成"生成 → 退出壳 → 改名 → 重启"交给人在中间搬运：
+
+| 保证 | 实现 |
+| --- | --- |
+| 不改坏别的文件 | 新归档从原归档的重建而来；除 `lib/main.js` 外每个 packed 条目**逐字节比对**，不同就整体放弃 |
+| 重复执行安全 | 状态已是目标值就只报告（`apply` 已开启 / `revert` 未开启），不写文件 |
+| 关闭不依赖备份 | `revert` 把两处改写**反向写回去**，`app.asar.orig` 只是额外保险；旧实现直接换回备份，一旦备份本身是补丁版就变成"点了关闭其实没关掉" |
+| 备份不被污染 | `apply` 只在 `app.asar.orig` 缺失或本身被污染时才写；干净的备份永不被补丁版覆盖 |
+| 壳在跑也能完成 | Windows 上运行中的 `app.asar` 被内存映射占用，改名报 `EBUSY`；脚本原地等待并提示退出 DSH，退出后继续。macOS/Linux 上 `rename` 当场成功，下次启动生效 |
+| 权限不够时 | 写探测失败即请求提权（Windows `Start-Process -Verb RunAs`，macOS `osascript ... with administrator privileges`），整段操作在提权后的进程里重跑 |
+| 跨平台 | 同一个 `.mjs` 里平台差异只有：安装目录候选（`Program Files` / `*.app/Contents/Resources`）、启动器后缀（`.cmd` / `.command`）、提权方式 |
+
+启动器（`.cmd` / `.command`）只做三件事：找 Node（DSH 自带运行时优先，其次 PATH、常见安装位置）、转交参数、结束时留住窗口。补丁逻辑一行都不在启动器里。
 
 ---
 
@@ -330,10 +346,9 @@ Host 半侧另有两条只读通道，专门用来回答"为什么重启后要�
 
 | 通道 | 内容 |
 | --- | --- |
-| `GET /dsh-chat-embed/patch-check` | 安装目录、`app.asar` 是否可写、是否已打补丁、补丁点是否还存在、备份与待替换文件、大小与内容哈希、**可执行的补丁命令**（含自带 Node 运行时路径与 `--resources`） |
+| `GET /dsh-chat-embed/patch-check` | 安装目录、`app.asar` 是否可写、是否已打补丁、补丁点是否还存在、备份**是否干净**、脚本与启动器的绝对路径、开启/关闭两条命令、大小与内容哈希 |
 
-客户端拿到探针结果后不再内联渲染，而是通过 `uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'append' })` 打开一个新会话，把事实与授权边界写进草稿；用户点发送即可。这与 DSH 自身「创建你的插件」入口用的是同一个 API，`whenDraftExists` 的取值语义在 `dsh-client-ui-conversation` 的 `requestDraftInitialization` 里定义（`replace` / `keep` / `append`）。
-| agent 工具 `dsh_chat_embed_patch_check` | 同一份读数，供模型直接查询（只读，无需审批） |
+客户端拿到探针结果后**不开会话、不问模型**：确认框里直接写脚本的绝对路径，主按钮把「路径 + 命令」复制到剪贴板。补丁怎么改、改哪两处、怎么校验，全部在脚本里，不经过任何模型的判断。
 
 > 读取 `app.asar` 必须走 Electron 的 `original-fs`：被补丁过的 `node:fs` 会把以 `.asar` 结尾的路径当成目录，`readFileSync` 直接 ENOENT。探针优先用 `original-fs`，普通 Node 下回落到 `node:fs`。
 | `openPanel` | 选中中央面板（等价于点左栏图标；探针路径不等于真实点击，见下） |

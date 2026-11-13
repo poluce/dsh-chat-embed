@@ -276,24 +276,18 @@ let activeCtx = undefined
         persistHint: 'Needs the shell patch; a plugin cannot change how the shell names partitions.',
         persistRisk:
           'Experimental: the patch rewrites the app.asar of the desktop shell and needs write access to its install folder. A shell update replaces it, so the patch has to be applied again.',
-        persistCheckHint: 'Opens a new session and drafts the check for you',
+        persistCheckHint: 'Run the patch script, then restart DSH',
         persistConfirmTitle: 'Turn on “login across restarts”?',
-        persistConfirmNote: 'Continuing opens a new session containing the task and the known facts; sending it lets the agent apply the patch and hand you the elevated command if permissions block it.',
-        persistConfirmGo: 'Continue',
+        persistConfirmNote: 'No session is needed: the script below does the whole thing. Run it, quit DSH when it says so, and it swaps the file and tells you to restart.',
+        persistConfirmGo: 'Copy command',
         persistConfirmCancel: 'Cancel',
         persistOffTitle: 'Turn off "logins survive restarts"?',
         persistOffBody: 'This removes the patch and puts the original app.asar back. Every restart will ask you to sign in again; flip the switch to undo.',
-        restoreTask: 'Remove the DSH desktop shell patch that keeps embedded chat logins across restarts, restoring the original app.asar.',
-        restoreStepsTitle: 'Restore steps (DSH must be fully quit first)',
-        restoreWarning: 'After this, logins no longer survive a restart.',
-
-        patchNoWorkspace: 'This composition has no Session service; the patch instructions were copied to the clipboard.',
-        patchTask: 'Apply the DSH desktop shell patch that keeps embedded chat logins across restarts.',
-        patchTaskDir: 'Install directory',
-        patchTaskCommand: 'Command',
-        patchTaskReadonly: 'The plugin reports this directory as not writable, which can be wrong: run it anyway and let the system answer. Only if the write is actually refused, hand me the command that needs administrator rights — do not work around it another way.',
-        patchTaskNoSite: 'This shell version has no patch site, so the patch does not apply — explain why and change nothing else.',
-        patchTaskVerify: 'When it is done, tell me how to verify (restart DSH, reopen the settings menu).',
+        patchScriptLabel: 'Script',
+        patchCommandLabel: 'Command',
+        patchScriptMissing: 'The patch script is not in this install (tools/shell-patch). The plugin may live elsewhere, or the package is incomplete.',
+        patchNoSite: 'This shell version has no patch site, so the script needs updating too; running it only reports that and changes nothing.',
+        patchRestartHint: 'Restart DSH afterwards for the change to take effect.',
         copyDiag: 'Copy diagnostics',
         copied: 'Copied',
         copyFailed: 'Copy failed',
@@ -370,23 +364,18 @@ let activeCtx = undefined
         persistUnknown: '尚未检测',
         persistHint: '需要桌面壳补丁；插件无法改变壳的分区命名。',
         persistRisk: '实验性功能：补丁会改写桌面壳的 app.asar，需要安装目录的写权限；桌面壳升级会覆盖补丁，需要重新打一次。',
-        persistCheckHint: '打开新会话，把检查内容写好，点发送即可',
+        persistCheckHint: '运行补丁脚本，改完重启 DSH',
         persistConfirmTitle: '开启「重启保持登录」？',
-        persistConfirmNote: '点击「继续」会打开一个新会话，里面是给它的任务说明和已知事实；发送后由它完成补丁操作，遇到权限问题会给出需要提权的命令。',
-        persistConfirmGo: '继续',
+        persistConfirmNote: '不需要开会话：下面这个脚本自己完成全部操作。运行它，按提示退出 DSH，脚本会替换好文件并提醒你重启。',
+        persistConfirmGo: '复制命令',
         persistConfirmCancel: '取消',
         persistOffTitle: '关闭「重启保持登录」？',
         persistOffBody: '会撤掉补丁、恢复原版 app.asar。之后每次重启都要重新登录；想再开启，再点一次这个开关即可。',
-        restoreTask: '把 DSH 桌面版的「重启保持登录」补丁撤掉，恢复原版 app.asar。',
-        restoreStepsTitle: '还原步骤（必须在 DSH 完全退出后）',
-        restoreWarning: '撤掉后登录态不再跨重启保留，每次重启都要重新登录。',
-        patchNoWorkspace: '当前拼装没有会话服务，补丁说明已复制到剪贴板。',
-        patchTask: '给 DSH 桌面版打上「跨重启保持登录」补丁。',
-        patchTaskDir: '安装目录',
-        patchTaskCommand: '命令',
-        patchTaskReadonly: '插件探测显示安装目录不可写（可能误判）：照常执行，让系统自己回答。如果确实被拒绝写入，再把需要管理员权限的命令给我，不要用别的办法绕过。',
-        patchTaskNoSite: '当前桌面壳版本找不到补丁点，补丁不适用——说明原因即可，不要改别的。',
-        patchTaskVerify: '打好后告诉我怎么验证（重启 DSH，回设置菜单看状态）。',
+        patchScriptLabel: '脚本',
+        patchCommandLabel: '命令',
+        patchScriptMissing: '这个安装里找不到补丁脚本（tools/shell-patch）。插件可能装在别处，或包不完整。',
+        patchNoSite: '当前桌面壳版本里找不到补丁点，脚本也需要更新；运行它只会报告这一点，不会改动文件。',
+        patchRestartHint: '运行后请重新打开 DSH 使其生效。',
         copyDiag: '复制诊断信息',
         copied: '已复制',
         copyFailed: '复制失败',
@@ -2534,25 +2523,23 @@ let activeCtx = undefined
      * @param {any} [probe]
      * @returns {string}
      */
-    function patchInstructions(t, probe) {
+    function patchInstructions(t, probe, mode) {
       const info = probe !== undefined && probe !== null ? probe : {}
+      const action = mode === 'off' ? 'revert' : 'apply'
       const command =
-        typeof info.patchCommand === 'string' && info.patchCommand !== ''
-          ? info.patchCommand
-          : 'node tools/shell-patch/patch-asar.cjs build'
-      const lines = [t('persistLabel') + '：' + t('persistHint'), '']
-      lines.push('1) 执行下面这条命令（Desk 自带的 Node 运行时；无需另装 Node）：')
-      lines.push('   ' + command)
-      lines.push('   脚本会自动探测安装目录并逐字节校验，生成 app.asar.new。')
+        typeof info[action + 'Command'] === 'string' && info[action + 'Command'] !== ''
+          ? info[action + 'Command']
+          : 'node tools/shell-patch/shell-patch.mjs ' + action
+      const lines = []
+      lines.push(t('persistLabel') + '：' + t('persistConfirmTitle'))
       lines.push('')
-      lines.push('2) 完全退出 DSH 后替换（任选其一）：')
-      lines.push('   - 运行 tools/shell-patch/watchdog.ps1，退出瞬间自动替换；')
-      lines.push('   - 手动把 resources\\app.asar.new 改名为 app.asar。')
+      if (typeof info.launcher === 'string' && info.launcher !== '') {
+        lines.push(t('patchScriptLabel') + ': ' + info.launcher)
+      }
+      lines.push(t('patchCommandLabel') + ':')
+      lines.push('  ' + command)
       lines.push('')
-      lines.push('3) 重启 DSH，回到这里应显示「' + t('persistOn') + '」。')
-      lines.push('')
-      lines.push('回滚：restore-shell-patch.cmd（把 app.asar.orig 换回去）。')
-      lines.push('Windows 之外的安装目录请用 --resources 指定。')
+      lines.push(t('patchRestartHint'))
       return lines.join('\n')
     }
 
@@ -2611,61 +2598,25 @@ let activeCtx = undefined
       return patchProbe.value
     }
 
-    /**
-     * Hand the self-check to a Session instead of rendering it into the menu.
-     *
-     * A report inside the settings menu made the panel unusable: absolute paths
-     * and a full command line stretched it across the surface, and the result was
-     * a one-shot answer kept in panel state. A Session is the right place — the
-     * agent can call the patch-check tool, read the reply and explain it, and the
-     * user confirms by pressing send.
-     *
-     * @param {(key: string) => string} t
-     * @returns {Promise<void>}
-     */
-    async function openPatchCheckSession(t, mode) {
-      const host = activeCtx
-      // Nothing in here may fail silently: a click that does nothing is
-      // indistinguishable from a broken build, so every step is logged and the
-      // reason comes back to the dialog.
+    async function copyPatchCommand(t, mode) {
+      // No session, no agent: the script does the whole job, so all this has to
+      // do is put its exact path and command on the clipboard. Every step is
+      // logged and the reason comes back to the dialog, because a click that
+      // does nothing is indistinguishable from a broken build.
       let failure = ''
+      patchCheck.running = true
+      notify()
       try {
-        log('info', 'patch-check: entered')
-        const workspace = host !== undefined && typeof host.get === 'function' ? host.get('uiWorkspace') : undefined
-        log(
-          'info',
-          'patch-check: uiWorkspace ' +
-            (workspace === undefined || workspace === null ? 'missing' : 'startSession=' + typeof workspace.startSession),
-        )
-        if (workspace === undefined || workspace === null || typeof workspace.startSession !== 'function') {
-          void copyText(patchInstructions(t, patchProbe.value))
-          failure = t('patchNoWorkspace')
-          return failure
-        }
-        patchCheck.running = true
-        notify()
+        log('info', 'patch-command: entered')
         const probe = await fetchProbe()
-        log('info', 'patch-check: probe ' + (probe === undefined || probe === null ? 'absent' : 'ok'))
-        const prompt = mode === 'off' ? buildRestorePrompt(t, probe) : buildPatchPrompt(t, probe)
-        patchProbe.loaded = false
-        // A custom main panel stays selected when a Session opens, so the new
-        // Session lands behind this panel and the click looks like a no-op.
-        // Hand the main area back to the conversation first.
-        const layout = host !== undefined && typeof host.get === 'function' ? host.get('layout') : undefined
-        if (layout !== undefined && layout !== null && typeof layout.selectPanel === 'function') {
-          log('info', 'patch-check: releasing the main panel before opening the Session')
-          layout.selectPanel(null)
-        }
-        log('info', 'patch-check: opening a Session with a ' + prompt.length + '-char draft')
-        // 'replace', not 'append': the Workspace blank can already hold a draft
-        // from another flow (the plugin-creation template, for one), and appending
-        // would hand the agent two unrelated instructions at once.
-        workspace.startSession(undefined, { prompt, whenDraftExists: 'replace' })
-        log('info', 'patch-check: startSession returned')
+        log('info', 'patch-command: probe ' + (probe === undefined || probe === null ? 'absent' : 'ok'))
+        const text = patchInstructions(t, probe, mode)
+        const copied = await copyText(text)
+        log('info', 'patch-command: clipboard ' + (copied ? 'ok' : 'failed'))
+        if (copied !== true) failure = t('copyFailed')
       } catch (error) {
         failure = messageOf(error)
-        log('error', 'patch-check: failed', failure)
-        void copyText(patchInstructions(t, patchProbe.value) + '\n' + t('copyFailed') + ': ' + failure)
+        log('error', 'patch-command: failed', failure)
       } finally {
         patchCheck.running = false
         notify()
@@ -2673,57 +2624,7 @@ let activeCtx = undefined
       return failure
     }
 
-    /**
-     * The draft for the other direction: put the original app.asar back.
-     *
-     * Turning the switch off is a real operation, not a dead end — the patch
-     * kept a copy, so undoing it is a rename away.
-     *
-     * @param {(key: string) => string} t
-     * @param {any} [probe]
-     * @returns {string}
-     */
-    function buildRestorePrompt(t, probe) {
-      const info = probe !== undefined && probe !== null ? probe : {}
-      const lines = [t('restoreTask')]
-      if (typeof info.resources === 'string' && info.resources !== '') {
-        lines.push('', t('patchTaskDir') + ': ' + info.resources)
-      }
-      if (typeof info.asar === 'string' && info.asar !== '') {
-        lines.push('', t('restoreStepsTitle') + ':')
-        lines.push('  1. ' + info.asar + ' -> ' + info.asar + '.patched.bak')
-        lines.push('  2. ' + info.asar + '.orig -> ' + info.asar)
-      }
-      if (info.writable === false) lines.push('', t('patchTaskReadonly'))
-      lines.push('', t('restoreWarning'))
-      lines.push('', t('patchTaskVerify'))
-      return lines.join('\n')
-    }
 
-    /**
-     * The text dropped into the new Session's draft: what is already known, so
-     * the agent starts from facts instead of asking the user to run something.
-     *
-     * @param {(key: string) => string} t
-     * @param {any} probe
-     * @returns {string}
-     */
-    function buildPatchPrompt(t, probe) {
-      const info = probe !== undefined && probe !== null ? probe : {}
-      // The plugin already knows the state; the draft only says what to do about
-      // it. Anything the patch script enforces itself (byte checks, quitting
-      // first) does not belong here — that is a manual, not an instruction.
-      const lines = [t('patchTask')]
-      const command = typeof info.patchCommand === 'string' && info.patchCommand !== '' ? info.patchCommand : ''
-      if (typeof info.resources === 'string' && info.resources !== '') {
-        lines.push('', t('patchTaskDir') + ': ' + info.resources)
-      }
-      if (command !== '') lines.push('', t('patchTaskCommand') + ':', '  ' + command)
-      if (info.writable === false) lines.push('', t('patchTaskReadonly'))
-      if (info.patchSite === false) lines.push('', t('patchTaskNoSite'))
-      lines.push('', t('patchTaskVerify'))
-      return lines.join('\n')
-    }
 
     /** @returns {{ state: string, detail: string, seats: any[] }} */
     function rightSidebarStatus() {
@@ -3373,6 +3274,12 @@ let activeCtx = undefined
       const [confirmOpen, setConfirmOpen] = React.useState(false)
       const [confirmError, setConfirmError] = React.useState('')
       const [confirmMode, setConfirmMode] = React.useState('on')
+      // The launcher path the dialog names. Three states, because "still
+      // asking the Host" must not read as "this install has no script":
+      //   undefined  the probe has not answered yet
+      //   ''         it answered, and there is no launcher
+      //   '<path>'   the file to double-click
+      const [confirmScript, setConfirmScript] = React.useState(undefined)
 
       /**
        * Close the settings menu.
@@ -3636,7 +3543,19 @@ let activeCtx = undefined
                       closeMenu()
                       // The switch is a switch: on means the next click offers to undo it.
                       setConfirmMode(persistenceState() === 'on' ? 'off' : 'on')
+                      // The dialog names the file to run, so it must know where the
+                      // plugin put it. Until the probe answers, say nothing rather
+                      // than guess a path that may not exist.
+                      setConfirmScript(undefined)
                       setConfirmOpen(true)
+                      void fetchProbe().then((probe) => {
+                        const launcher =
+                          probe !== undefined && probe !== null && typeof probe.launcher === 'string'
+                            ? probe.launcher
+                            : ''
+                        setConfirmScript(launcher)
+                        notify()
+                      })
                     },
                   }),
                 ),
@@ -3700,9 +3619,12 @@ let activeCtx = undefined
                   t(confirmMode === 'off' ? 'persistOffTitle' : 'persistConfirmTitle'),
                 ),
                 h('div', { className: 'dce-card-body' }, t(confirmMode === 'off' ? 'persistOffBody' : 'persistRisk')),
-                confirmMode === 'off'
+                confirmMode === 'off' ? null : h('div', { className: 'dce-card-body' }, t('persistConfirmNote')),
+                confirmScript === undefined
                   ? null
-                  : h('div', { className: 'dce-card-body' }, t('persistConfirmNote')),
+                  : confirmScript === ''
+                    ? h('div', { className: 'dce-card-body' }, t('patchScriptMissing'))
+                    : h('div', { className: 'dce-card-detail' }, confirmScript),
                 confirmError === '' ? null : h('div', { className: 'dce-card-detail' }, confirmError),
                 h(
                   'div',
@@ -3722,14 +3644,14 @@ let activeCtx = undefined
                       onClick: () => {
                         log('info', 'dialog: the confirm button was clicked')
                         setConfirmError('')
-                        void openPatchCheckSession(t, confirmMode).then(
+                        void copyPatchCommand(t, confirmMode).then(
                           (failure) => {
                             if (typeof failure === 'string' && failure !== '') setConfirmError(failure)
                             else setConfirmOpen(false)
                           },
                           (error) => {
                             const reason = messageOf(error)
-                            log('error', 'dialog: openPatchCheckSession rejected', reason)
+                            log('error', 'dialog: copyPatchCommand rejected', reason)
                             setConfirmError(reason)
                           },
                         )
@@ -3984,9 +3906,7 @@ let activeCtx = undefined
         fetchProbe,
         patchProbe,
         patchCheck,
-        openPatchCheckSession,
-        buildPatchPrompt,
-        buildRestorePrompt,
+        copyPatchCommand,
         setLogging,
         clearLog,
         readLogEntries,

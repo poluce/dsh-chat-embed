@@ -1,12 +1,15 @@
 @echo off
 rem Free the disposable Chromium caches of the embedded browser, keep the logins.
 rem
-rem Usage:  清理聊天缓存.cmd [partitions-dir]
-rem The directory may also come from DSH_PARTITIONS; the usual locations are
-rem tried otherwise. Close DSH before running this.
-if "%~1"=="" (
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\shell-patch\clean-cache.ps1"
-) else (
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\shell-patch\clean-cache.ps1" -Partitions "%~1"
+rem This is a shortcut for "shell-patch.cmd cache"; the same thing is item 4 in
+rem that script's menu. Close DSH first for a thorough clean.
+setlocal
+set "HERE=%~dp0"
+if not exist "%HERE%tools\shell-patch\shell-patch.cmd" (
+  echo.
+  echo   [x] tools\shell-patch\shell-patch.cmd not found.
+  echo.
+  pause
+  exit /b 1
 )
-pause
+call "%HERE%tools\shell-patch\shell-patch.cmd" cache

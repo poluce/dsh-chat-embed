@@ -11,7 +11,9 @@
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import test, { afterEach } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import {
   DEFAULT_USER_AGENT,
@@ -23,6 +25,8 @@ import {
   resetEnvironment,
   waitFor,
 } from './fake-env.mjs'
+
+const here = dirname(fileURLToPath(import.meta.url))
 
 afterEach(() => {
   resetEnvironment()
@@ -1450,54 +1454,56 @@ test('a patch lost to a shell update is reported as lost, not as a first run', a
   assert.equal(instance.internals.persistenceState(), 'off')
 })
 
-test('the patch instructions name the tool, the replacement and the rollback', async () => {
+test('the instructions hand over the script, not a list of steps', async () => {
   const { internals } = await createInstance()
   const text = internals.patchInstructions((key) => internals.DICTS.zh[key] ?? key)
 
-  assert.match(text, /patch-asar\.cjs build/, 'the build command is there')
-  assert.match(text, /Desk 自带的 Node 运行时|自带的 Node/, 'the bundled runtime is named, so nobody installs Node')
-  assert.match(text, /app\.asar\.new/, 'the staged archive is named')
-  assert.match(text, /restore-shell-patch\.cmd/, 'the rollback is named')
-  assert.match(text, /--resources/, 'a non-standard install can be pointed at')
+  assert.match(text, /shell-patch\.mjs apply/, 'the one command that does the job is there')
+  assert.match(text, /重新打开 DSH/, 'the restart is the only follow-up asked for')
+  assert.doesNotMatch(text, /app\.asar\.new/, 'no hand-staged archive any more')
+  assert.doesNotMatch(text, /watchdog/, 'no second script to run afterwards')
+  assert.doesNotMatch(text, /改名/, 'nobody renames files by hand')
 })
 
-test('the patch instructions use the command the Host resolved', async () => {
+test('the instructions use the launcher the Host located', async () => {
   const { internals } = await createInstance()
   const t = (key) => internals.DICTS.zh[key] ?? key
   const text = internals.patchInstructions(t, {
-    patchCommand: '"C:\\Users\\me\\.dsh\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\node\\bin\\node.exe" C:\\pkg\\tools\\shell-patch\\patch-asar.cjs build',
-    nodeBinary: 'C:\\Users\\me\\.dsh\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\node\\bin\\node.exe',
+    launcher: 'C:\\pkg\\tools\\shell-patch\\shell-patch.cmd',
+    applyCommand: '"C:\\pkg\\tools\\shell-patch\\shell-patch.cmd" apply',
   })
-  assert.match(text, /dsh-runtimes/, 'the bundled Node binary is used, not a bare "node"')
-  assert.match(text, /patch-asar\.cjs build/)
+  assert.match(text, /shell-patch\.cmd/, 'the launcher is named')
+  assert.match(text, /apply/, 'and the direction it should take')
+  assert.doesNotMatch(text, /node\.exe/, 'no Node binary to think about')
 })
 
-test('the draft is the action, not a manual', async () => {
+test('turning the switch off hands over the revert, not the apply', async () => {
   const instance = await createInstance({ shell: createFakeShell() })
   attachSurface(instance)
-  const record = await openTab(instance, 'deepseek')
-  record.partition = 'persist:dsh-sidebar-abc'
   const t = (key) => instance.internals.DICTS.zh[key] ?? key
 
-  const prompt = instance.internals.buildPatchPrompt(t, {
-    resources: 'D:\\DSH\\resources',
-    asar: 'D:\\DSH\\resources\\app.asar',
-    backup: true,
-    writable: false,
-    patchSite: true,
-    patched: true,
-    patchCommand: '"D:\\nodejs\\node.exe" C:\\pkg\\patch-asar.cjs build --resources D:\\DSH\\resources',
-  })
+  const text = instance.internals.patchInstructions(
+    t,
+    {
+      launcher: 'D:\\pkg\\shell-patch.cmd',
+      applyCommand: '"D:\\pkg\\shell-patch.cmd" apply',
+      revertCommand: '"D:\\pkg\\shell-patch.cmd" revert',
+    },
+    'off',
+  )
+  assert.match(text, /revert/, 'the undo direction is handed over')
+  assert.doesNotMatch(text, /apply/, 'the enable direction is not repeated')
+})
 
-  // The plugin already did the diagnosis. The draft is the action, not a manual:
-  // four lines of work, no state table for the agent to re-derive.
-  assert.equal(prompt.split('\n')[0], '给 DSH 桌面版打上「跨重启保持登录」补丁。', 'it opens with the action')
-  assert.match(prompt, /D:\\DSH\\resources/, 'the install directory is handed over')
-  assert.match(prompt, /patch-asar\.cjs build/, 'the command is handed over')
-  assert.match(prompt, /不可写/, 'the unwritable directory is called out')
-  assert.doesNotMatch(prompt, /dsh_chat_embed_patch_check/, 'no tool name to look up — the draft stands alone')
-  assert.doesNotMatch(prompt, /\{facts\}/, 'no placeholder survives')
-  assert.ok(prompt.split('\n').length <= 12, 'four facts and blanks, nothing to read twice: ' + prompt.split('\n').length + ' lines')
+test('the instructions never invent a path the Host did not report', async () => {
+  const instance = await createInstance({ shell: createFakeShell() })
+  attachSurface(instance)
+  const t = (key) => instance.internals.DICTS.zh[key] ?? key
+
+  const text = instance.internals.patchInstructions(t, undefined)
+  assert.doesNotMatch(text, /undefined/, 'an absent probe does not leak into the text')
+  assert.doesNotMatch(text, /C:\\|\/Applications\//, 'no invented install path')
+  assert.match(text, /shell-patch\.mjs apply/, 'the fallback is still a runnable command')
 })
 
 test('the settings menu keeps no self-check result in its own state', async () => {
@@ -1509,80 +1515,49 @@ test('the settings menu keeps no self-check result in its own state', async () =
   assert.equal(internals.patchCheck.running, false)
 })
 
-test('one row opens a confirm dialog before it opens a session', async () => {
+test('one row opens a dialog that hands over the script', async () => {
   const { internals } = await createInstance()
   const t = (key) => internals.DICTS.zh[key] ?? key
 
-  // The status line and the check switch are one row now: a label and a button.
-  assert.equal(typeof internals.openPatchCheckSession, 'function')
-  assert.ok(t('persistCheckHint').length > 0, 'the button explains that a session is coming')
+  assert.equal(typeof internals.copyPatchCommand, 'function', 'one action hands over the command')
+  assert.ok(t('persistCheckHint').length > 0, 'the button explains what a click does')
   assert.match(internals.CSS, /\.dce-switch\{/, 'the row uses the shared switch styling')
 
-  // The warning moved out of an inline note and into a modal, so the note styling
-  // must be gone and the dialog styling present.
   assert.doesNotMatch(internals.CSS, /\.dce-menu-note/, 'no inline note survives')
   assert.doesNotMatch(internals.CSS, /data-patch-report/, 'the inline report styling is gone')
   assert.match(internals.CSS, /\.dce-confirm-scrim\{position:absolute;inset:0/, 'the dialog dims the panel')
   assert.match(internals.CSS, /\.dce-card\[data-modal="true"\]\{z-index:8\}/, 'the dialog sits above the menu')
 
-  // The warning text and both buttons exist in every language.
   for (const key of ['persistConfirmTitle', 'persistConfirmNote', 'persistConfirmGo', 'persistConfirmCancel']) {
     assert.ok(t(key).length > 0, key + ' is translated in zh')
     assert.ok(internals.DICTS.en[key].length > 0, key + ' is translated in en')
   }
   assert.ok(t('persistRisk').length > 0, 'the dialog carries the experimental warning')
-  assert.match(t('persistConfirmNote'), /新会话/, 'the dialog says a session will open')
+  // No agent is involved any more: the note must not promise a session.
+  assert.doesNotMatch(t('persistConfirmNote'), /新会话/, 'the dialog does not open a session')
+  assert.match(t('persistConfirmNote'), /脚本/, 'it names the script instead')
 })
-
-test('the prompt survives a Host that answers nothing', async () => {
+test('the command text is what a user can act on without help', async () => {
   const instance = await createInstance({ shell: createFakeShell() })
   attachSurface(instance)
   const t = (key) => instance.internals.DICTS.zh[key] ?? key
 
-  const prompt = instance.internals.buildPatchPrompt(t, undefined)
-  assert.equal(prompt.split('\n')[0], '给 DSH 桌面版打上「跨重启保持登录」补丁。', 'the action still leads')
-  assert.match(prompt, /怎么验证/, 'the closing instruction survives')
-  assert.doesNotMatch(prompt, /undefined/, 'an absent probe does not leak into the draft')
-  assert.doesNotMatch(prompt, /安装目录:/, 'no empty directory line is invented')
-  assert.doesNotMatch(prompt, /命令:/, 'no empty command block is invented')
+  const text = instance.internals.patchInstructions(t, {
+    launcher: 'D:\\pkg\\shell-patch.cmd',
+    applyCommand: '"D:\\pkg\\shell-patch.cmd" apply',
+  })
+  assert.ok(text.split('\n').length <= 8, 'the whole handover fits on one card: ' + text.split('\n').length + ' lines')
+  assert.match(text, /D:\\pkg\\shell-patch\.cmd/, 'the file to double-click is named')
+  assert.match(text, /apply/, 'the command is complete, not a fragment')
 })
 
-test('turning the switch off hands over a restore, not an enable', async () => {
-  const instance = await createInstance({ shell: createFakeShell() })
-  attachSurface(instance)
-  const t = (key) => instance.internals.DICTS.zh[key] ?? key
-
-  const probe = {
-    resources: 'D:\\DSH\\resources',
-    asar: 'D:\\DSH\\resources\\app.asar',
-    writable: true,
-    patchSite: true,
-    patched: true,
-  }
-  const prompt = instance.internals.buildRestorePrompt(t, probe)
-
-  assert.match(prompt, /撤掉/, 'it asks for the patch to be removed')
-  assert.match(prompt, /app\.asar\.orig/, 'the restore names the backup copy')
-  assert.match(prompt, /app\.asar\.patched\.bak/, 'the current archive is kept, not deleted')
-  assert.match(prompt, /完全退出/, 'the restore says DSH must be closed first')
-  assert.match(prompt, /重新登录/, 'it states what turning the feature off costs')
-  assert.doesNotMatch(prompt, /patch-asar\.cjs build/, 'it is not the enable prompt again')
-  assert.ok(prompt.split('\n').length <= 12, 'still short: ' + prompt.split('\n').length + ' lines')
-})
-
-test('the prompt reflects the probe instead of restating it', async () => {
-  const instance = await createInstance({ shell: createFakeShell() })
-  attachSurface(instance)
-  const t = (key) => instance.internals.DICTS.zh[key] ?? key
-
-  const shell = { resources: 'D:\\DSH\\resources', patchCommand: 'node patch-asar.cjs build' }
-  const healthy = instance.internals.buildPatchPrompt(t, { ...shell, patchSite: true, patched: true, writable: true })
-  assert.doesNotMatch(healthy, /不可写/, 'a writable directory is not mentioned')
-  assert.doesNotMatch(healthy, /找不到补丁点/, 'a present patch site is not mentioned')
-
-  const blocked = instance.internals.buildPatchPrompt(t, { ...shell, patchSite: true, patched: false, writable: false })
-  assert.match(blocked, /不可写/, 'an unwritable directory changes what the agent may do')
-
-  const noSite = instance.internals.buildPatchPrompt(t, { ...shell, patchSite: false })
-  assert.match(noSite, /找不到补丁点/, 'an absent patch site is reported as inapplicable')
+test('a dialog that is still asking does not claim the script is missing', async () => {
+  const { internals } = await createInstance()
+  const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
+  // Three states, not two: undefined while the probe is in flight, '' when it
+  // answered "no launcher", a path otherwise. Writing this as a boolean would
+  // flash "the script is missing" on every open.
+  assert.match(source, /useState\(undefined\)/, 'the dialog starts in the unknown state')
+  assert.match(source, /confirmScript === undefined/, 'the unknown state renders nothing')
+  assert.ok(internals.DICTS.zh.patchScriptMissing.length > 0, 'and the missing state has its own wording')
 })

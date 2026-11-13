@@ -22,8 +22,7 @@
 | `scripts/verify-bundle.mjs` | 门禁：语法 / 清单 / loader 契约 / 服务注册表 / 显示资源 |
 | `test/` | 纯 Node 契约测试（伪造 DOM + 伪造桌面桥 + 伪造 asar），81 项 |
 | `docs/architecture.md` | 内嵌契约、席位架构、壳补丁、升级复验清单（**接到项目先读这份**） |
-| `tools/shell-patch/` | 可选的桌面壳补丁：持久分区（跨重启免登录）+ 关闭磁盘缓存 |
-| `清理聊天缓存.cmd` / `restore-shell-patch.cmd` | 缓存回收 / 还原原版壳 |
+| `tools/shell-patch/` | 可选的桌面壳补丁：一个脚本管开启 / 关闭 / 清缓存 |
 
 **没有第三方运行时依赖**：`client.js` 直接由 dsh 的模块加载器执行，React 用壳共享的那一份。
 
@@ -33,7 +32,7 @@
 | --- | --- |
 | 怎么装、怎么用 | 本文件（README） |
 | 为什么这样实现、内嵌契约、升级外壳时的复验清单 | `docs/architecture.md` |
-| 壳补丁（持久分区 / 关缓存）与回滚 | `tools/shell-patch/` + `restore-shell-patch.cmd` |
+| 壳补丁（持久分区 / 关缓存）与回滚 | `tools/shell-patch/shell-patch.cmd`（macOS 用 `.command`） |
 | 门禁与测试覆盖了什么 | `scripts/verify-bundle.mjs`、`test/client.test.mjs` |
 ---
 
@@ -168,42 +167,67 @@ dsh plugin --profile desktop add link:<本仓库克隆路径>
 
 ### 桌面壳补丁（可选，跨重启免登录）
 
-```powershell
-node tools/shell-patch/patch-asar.cjs build                      # 自动探测安装目录并生成 app.asar.new
-node tools/shell-patch/patch-asar.cjs build --resources "D:\DeepSeek Harness\resources"
-node tools/shell-patch/patch-asar.cjs --help                     # 查看参数
-# 关闭 DSH 后由 watchdog 自动替换，或手动替换 resources\app.asar
+**双击一个脚本就行，不需要 agent，也不需要装 Node。**
+
+| 平台 | 双击 |
+| --- | --- |
+| Windows | `tools/shell-patch/shell-patch.cmd` |
+| macOS | `tools/shell-patch/shell-patch.command` |
+
+脚本打开一个菜单：
+
+```
+  1) 开启
+  2) 关闭
+  3) 只看状态
+  4) 清理缓存（登录保留）
+  0) 退出
 ```
 
-> 通过 npm 安装时脚本位于 `<profile>/node_modules/<包名>/tools/shell-patch/`；也可以在「⚙ → 跨重启保持登录」里点「复制补丁说明」拿到步骤。
+选完按提示操作。**改完会提示重新打开 DSH**——正在运行的 DSH 用的是启动时读到的旧代码。
 
-### 补丁状态与自检（0.6.0 起）
+也可以在终端里直接跑：
 
-设置菜单里的「跨重启保持登录」有四种状态，**风险提示与「复制补丁说明」只在未生效时出现**：
+```powershell
+node tools/shell-patch/shell-patch.mjs status    # 只报告，不改文件
+node tools/shell-patch/shell-patch.mjs apply     # 开启
+node tools/shell-patch/shell-patch.mjs revert    # 关闭
+node tools/shell-patch/shell-patch.mjs cache     # 清缓存
+node tools/shell-patch/shell-patch.mjs apply --resources "D:\DeepSeek Harness\resources"
+```
 
-| 状态 | 含义 | 菜单里额外提供 |
-| --- | --- | --- |
-| 已开启（`persist:` 分区） | 补丁生效，重启后仍登录 | —（已是最优，只留「检查补丁配置」） |
-| 未开启（内存分区） | 从没打过补丁 | 风险提示 + 复制补丁说明 |
-| **已失效**（升级覆盖） | **打过补丁，但桌面壳升级覆盖了 `app.asar`** | 同上；这一状态专门告诉你"该重打了" |
-| 尚未检测 | 还没打开过聊天页 | 同上 |
+> 通过 npm 安装时脚本位于 `<profile>/node_modules/<包名>/tools/shell-patch/`；设置菜单里的开关也会告诉你它的确切位置。
 
-「检查补丁配置」是一行**开关样式**的控件，任何状态下都在。打开它不会在菜单里铺开报告——那会把面板撑宽——而是：
+**为什么要补丁**：桌面壳把内嵌浏览器的分区命名成 `dsh-sidebar-browser-<随机 uuid>`——没有 `persist:` 前缀（Chromium 只放内存），而且每次启动换一个新 uuid，一重启就全部退出登录。补丁改成按工作区身份 hash 出来的 `persist:` 分区，登录自然落盘。
 
-1. 读取一次 Host 侧只读探针（见下）；
-2. **打开一个新会话**，把已知事实（安装目录、可写性、补丁点、是否已打补丁、确切命令）预先写进输入框；
-3. 你点「发送」即可。agent 会调用 `dsh_chat_embed_patch_check` 工具核对，然后说明现状和该执行的命令。
+| 改写 | 效果 |
+| --- | --- |
+| `persist:` 固定分区 | 登录态落盘，跨重启保留 |
+| `cache:false` | 不写 Chromium 的磁盘缓存（可用 `--no-cache-patch` 关掉这一项） |
 
-这条路径用的就是 DSH 自己「创建你的插件」入口的同一个 API（`uiWorkspace.startSession`），所以行为与原生一致：已有草稿时追加而不是覆盖。没有 `uiWorkspace` 的宿主会退化成把说明复制到剪贴板。
+### 脚本怎么保证不出事
 
-背后是 Host 侧只读探针 `GET /dsh-chat-embed/patch-check`：安装目录、`app.asar` 是否可写、是否已打补丁、补丁点是否还在（壳版本是否兼容）、备份与待替换文件、大小与内容哈希。
+- **先校验再替换**：新归档从原归档自己的字节重建，除 `lib/main.js` 外**每个文件必须逐字节一致**，否则不动手；
+- **命令幂等**：已经是目标状态就只报告，不重复改；
+- **关闭不依赖备份文件**：`revert` 把两处改写**反向写回去**，所以即使 `app.asar.orig` 已经被弄脏（旧版本就踩过这个坑）也能还原成原版；
+- **干净备份才留**：已存在的干净 `app.asar.orig` 不会被补丁版覆盖——这正是旧版本「点了关闭其实没关掉」的原因；
+- **DSH 在跑就等**：Windows 上运行中的 `app.asar` 被内存映射占用，脚本原地提示你退出 DSH，退出后自动继续（macOS 上改名当场成功，下次启动生效）；
+- **需要提权会自动请求**：安装目录不可写时 Windows 弹 UAC、macOS 弹管理员授权，不用自己开管理员终端再敲一遍。
 
-**不需要自己装 Node.js**：探针会找出桌面版自带的 Node 运行时（`~/.dsh/dsh-runtimes/*/dependencies/node/`），并把一条完整可复制的命令写进草稿——含正确的 Node 路径、补丁脚本路径和 `--resources` 安装目录（自定义/便携安装也能用）。
+### 补丁状态
 
-Host 侧还注册了只读工具 **`dsh_chat_embed_patch_check`**：可以直接问 agent「我的聊天为什么重启后要重新登录」，它会自己去查这些事实，而不是让你跑命令再贴输出——上面第 2 步的草稿就是让它这么做的。
+设置菜单里「重启保持登录」这一行显示四种状态：
 
-补丁做两件事：`persist:` 固定分区（登录落盘）+ `cache:false`（不落 Chromium 缓存）。
-没有补丁也能用，只是每次重启要重新登录。细节与风险见 [已知限制](#已知限制)。
+| 状态 | 含义 |
+| --- | --- |
+| 已开启（`persist:` 分区） | 补丁生效，重启后仍登录 |
+| 未开启（内存分区） | 没打过补丁 |
+| **已失效**（升级覆盖） | 打过补丁，但桌面壳升级覆盖了 `app.asar`，重跑一次即可 |
+| 尚未检测 | 还没打开过聊天页 |
+
+点开关会弹一个确认框，里面写着**该双击哪个脚本**；点「复制命令」把脚本路径和命令一起复制走。
+
+背后是 Host 侧只读探针 `GET /dsh-chat-embed/patch-check`：安装目录、`app.asar` 是否可写、是否已打补丁、补丁点是否还在（壳版本是否兼容）、备份**是否干净**、脚本与启动器的绝对路径、开启与关闭两条命令。它只读，不写任何文件。
 
 ### 界面语言
 
@@ -221,7 +245,7 @@ Host 侧还注册了只读工具 **`dsh_chat_embed_patch_check`**：可以直接
 dsh-chat-embed/
 ├── package.json               # 包名/版本、dsh.bundle.patch、dsh.client、exports/files
 ├── cordis.patch.yml           # 组合补丁：插入 id=chat-embed 的 loader 行
-├── index.js                   # Host 半侧：补丁探针（HTTP + agent 工具）
+├── index.js                   # Host 半侧：补丁探针（只读 HTTP 路由）
 ├── client.js                  # Client 半侧（约 3985 行，手写产物）
 ├── locale/{en,zh}.json        # 插件管理器显示用 meta
 ├── icon.svg                   # 插件图标（插件管理器显示）
@@ -240,11 +264,10 @@ dsh-chat-embed/
 │   ├── architecture.md        # 架构与内嵌契约（先读这份）
 │   └── publishing.md          # 维护者：发版、分发与列表投稿
 ├── tools/shell-patch/         # 随 npm 包发布
-│   ├── patch-asar.cjs         # 壳补丁（持久分区 + 关缓存）
-│   ├── watchdog.ps1           # 退出时替换 asar
-│   └── clean-cache.ps1        # 只删缓存、保留登录
-├── 清理聊天缓存.cmd
-├── restore-shell-patch.cmd
+│   ├── shell-patch.mjs        # 全部逻辑：status / apply / revert / cache
+│   ├── shell-patch.cmd        # Windows 双击入口（自己找 Node）
+│   └── shell-patch.command    # macOS 双击入口
+├── 清理聊天缓存.cmd           # 快捷方式：等价于 shell-patch.cmd cache
 ├── LICENSE (MIT)
 └── README.md
 ```
@@ -320,8 +343,8 @@ node scripts/release.mjs 0.6.7 --summary "..." --dry-run   # 只看计划
 | 标签变红（`data-failed`） | 该标签租约或导航失败：点它看状态行 `detail`，再「重新加载」 |
 | 显示「已连接」但页面空白 | 网络或站点风控；「重新加载」或「外开」 |
 | 出现「使用环境异常」 | UA 归一化失效（壳升级后 UA 结构变了），查 `normalizedUserAgent` |
-| 重启后要重新登录 | 未打壳补丁，或补丁被客户端升级覆盖：菜单「检查补丁配置」→ 发送，让 agent 核对并给出命令 |
-| 磁盘占用变大 | 执行 `清理聊天缓存.cmd`（只删缓存，保留登录）；或确认补丁含 `cache:false` |
+| 重启后要重新登录 | 未打壳补丁，或补丁被客户端升级覆盖：双击 `tools/shell-patch/shell-patch.cmd` 选「1) 开启」 |
+| 磁盘占用变大 | 双击同一个脚本选「4) 清理缓存」（只删缓存，保留登录）；或确认补丁含 `cache:false` |
 | 标签文字/顺序要改 | 只改 `PROVIDERS`，`npm run check` + 重装 |
 
 ---

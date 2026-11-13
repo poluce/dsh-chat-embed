@@ -8,9 +8,8 @@
  *   1. the loader row named by `cordis.patch.yml` needs a Node-side export;
  *   2. the optional shell patch needs a **Host-side** answer, because the
  *      patched archive lives on the Host's disk and only the Host can read
- *      and test it. The panel asks over the exposed channel, so a user can
- *      see why cross-restart login is off without being told to run a
- *      command and read its output.
+ *      and test it. The panel asks over the exposed channel, so the dialog can
+ *      name the exact script to run instead of guessing a path.
  *
  * Keep this module inert beyond that probe. It must not import browser
  * globals, and anything it registers must be cleaned up through `ctx.effect`
@@ -18,7 +17,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { accessSync, constants, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -27,13 +26,13 @@ import { fileURLToPath } from 'node:url'
 export const name = 'dsh-chat-embed'
 
 /**
- * Wait for the two Host services before apply runs.
+ * Wait for the web server before apply runs.
  *
- * Without this the loader calls apply while the tree is still assembling, both
- * looksups below read undefined, and the probe route and the agent tool are
- * silently skipped — which is exactly what happened until 0.6.10.
+ * Without this the loader calls apply while the tree is still assembling, the
+ * lookup below reads undefined, and the probe route is silently skipped — which
+ * is exactly what happened until 0.6.10.
  */
-export const inject = ['webServer', 'tools']
+export const inject = ['webServer']
 
 /** Route the panel fetches for the read-only shell probe. */
 const PROBE_PATH = '/dsh-chat-embed/patch-check'
@@ -164,69 +163,39 @@ function readAsarEntry(file, entry) {
 }
 
 /**
- * Locate a Node binary that can run the patch tool.
+ * The launcher the user double-clicks, and the command line that does the same
+ * thing in a terminal. Both end up in the same script; the launcher adds a
+ * window that stays open and finds Node by itself.
  *
- * DSH runs every profile on its own packaged runtime, so the archive can be
- * patched without the user installing Node. The order is: the runtime this
- * Host is already running on, the managed runtime directory, then a system
- * `node` on PATH.
- *
- * @returns {string | undefined} an absolute path, or undefined when none exists
- */
-function findNodeBinary() {
-  const candidates = []
-  // A Node-hosted dsh reports its own executable.
-  if (typeof process.execPath === 'string' && process.execPath !== '' && /node(.exe)?$/i.test(process.execPath)) {
-    candidates.push(process.execPath)
-  }
-  // The managed runtime the desktop app installs beside its own data.
-  const home = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== '' ? process.env.DSH_HOME : join(homedir(), '.dsh')
-  const runtimes = join(home, 'dsh-runtimes')
-  try {
-    for (const entry of readdirSync(runtimes)) {
-      const base = join(runtimes, entry, 'dependencies', 'node', 'bin')
-      candidates.push(join(base, process.platform === 'win32' ? 'node.exe' : 'node'))
-    }
-  } catch (error) {
-    void error
-  }
-  if (process.platform === 'win32' && process.env.ProgramFiles !== undefined) {
-    candidates.push(join(process.env.ProgramFiles, 'nodejs', 'node.exe'))
-  } else {
-    candidates.push('/usr/local/bin/node')
-    candidates.push('/usr/bin/node')
-  }
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate !== '' && existsSync(candidate)) return candidate
-  }
-  return undefined
-}
-
-/**
- * @param {string} node absolute path to a Node binary
- * @param {string} script absolute path to patch-asar.cjs
- * @param {string} [resources] install directory, so a non-standard location works
- * @returns {string} a copy-pasteable command line
- */
-function patchCommand(node, script, resources) {
-  const quote = (value) => (value.includes(' ') ? '"' + value + '"' : value)
-  const parts = [quote(node), quote(script), 'build']
-  // The tool only searches the usual install locations. When the Host found the
-  // shell somewhere else (a portable or custom install), it must say where.
-  if (typeof resources === 'string' && resources !== '') parts.push('--resources', quote(resources))
-  return parts.join(' ')
-}
-
-/**
- * Locate the patch tool inside this package, so the reported command points at
- * a file that actually exists on the user's disk.
- *
+ * @param {'apply' | 'revert'} action
+ * @param {string} [launcher] absolute path to the platform launcher
  * @returns {string | undefined}
  */
-function findPatchScript() {
+function launcherCommand(action, launcher) {
+  if (typeof launcher !== 'string' || launcher === '') return undefined
+  return launcher.includes(' ') ? '"' + launcher + '" ' + action : launcher + ' ' + action
+}
+
+/**
+ * Locate the patch entry point inside this package, so what the panel offers
+ * points at files that actually exist on the user's disk.
+ *
+ * @returns {{ script?: string, launcher?: string }}
+ */
+function findPatchFiles() {
   const here = dirname(fileURLToPath(import.meta.url))
-  const candidate = join(here, 'tools', 'shell-patch', 'patch-asar.cjs')
-  return existsSync(candidate) ? candidate : undefined
+  const dir = join(here, 'tools', 'shell-patch')
+  const script = join(dir, 'shell-patch.mjs')
+  const launcher =
+    process.platform === 'win32'
+      ? join(dir, 'shell-patch.cmd')
+      : process.platform === 'darwin'
+        ? join(dir, 'shell-patch.command')
+        : undefined
+  return {
+    script: existsSync(script) ? script : undefined,
+    launcher: launcher !== undefined && existsSync(launcher) ? launcher : undefined,
+  }
 }
 
 /**
@@ -269,6 +238,10 @@ function inspectShell(resources) {
     exists: true,
     writable: existsSync(asar) ? isWritable(asar) : isWritable(resolved),
     backup: existsSync(backup),
+    // A backup that is itself patched cannot restore anything, and reporting it
+    // as "present" is exactly what made a rollback look available when it was
+    // not. Say which kind it is.
+    backupClean: undefined,
     staged: existsSync(staged),
     patched: undefined,
     patchSite: undefined,
@@ -289,6 +262,15 @@ function inspectShell(resources) {
     }
     report.patched = main.includes(PATCH_MARK)
     report.cachePatch = main.includes(CACHE_MARK)
+    if (report.backup === true) {
+      try {
+        const copy = readAsarEntry(backup, 'lib/main.js')
+        report.backupClean = copy !== undefined && !copy.includes(PATCH_MARK)
+      } catch (error) {
+        void error
+        report.backupClean = false
+      }
+    }
     report.patchSite = main.includes(PATCH_SITE_MARK) || main.includes(PATCH_MARK)
     if (report.patched !== true && report.patchSite === false) {
       report.detail = '补丁点不存在：当前桌面壳版本的分区写法与补丁预期不一致，需要更新补丁'
@@ -298,13 +280,14 @@ function inspectShell(resources) {
   } catch (error) {
     report.detail = '解析 app.asar 失败：' + firstLine(error)
   }
-  // The user needs a Node binary to run the patch tool. The desktop app ships
-  // its own runtime, so nobody has to install one — report the exact command
-  // instead of telling them to install Node first.
-  report.patchScript = findPatchScript()
-  report.nodeBinary = findNodeBinary()
-  report.patchCommand =
-    report.nodeBinary === undefined ? undefined : patchCommand(report.nodeBinary, report.patchScript, resolved)
+  // The patch is one script with one command for each direction. The launcher
+  // is what the user double-clicks; it finds Node on its own, so the panel never
+  // has to talk about runtimes.
+  const files = findPatchFiles()
+  report.script = files.script
+  report.launcher = files.launcher
+  report.applyCommand = launcherCommand('apply', files.launcher)
+  report.revertCommand = launcherCommand('revert', files.launcher)
   return report
 }
 
@@ -360,50 +343,6 @@ function installHttpProbe(ctx) {
 }
 
 /**
- * Register the patch checker as an agent tool, so the model can answer
- * "why does my login not survive a restart?" by looking instead of asking the
- * user to run a command and paste its output.
- *
- * The tool is read-only and needs no approval: it reports paths, byte counts
- * and whether the patch marks are present, which the user could read off the
- * disk themselves.
- *
- * @param {import('@deepseek-ai/cordis').Context} ctx
- * @returns {(() => void) | undefined} a disposer, or undefined without a tool registry
- */
-function installTool(ctx) {
-  const tools = typeof ctx.get === 'function' ? ctx.get('tools') : undefined
-  if (tools === undefined || tools === null || typeof tools.register !== 'function') return undefined
-  const definition = {
-    name: 'dsh_chat_embed_patch_check',
-    description:
-      'Report whether the DSH desktop shell has the optional patch that keeps embedded chat logins across restarts: the install directory, whether app.asar is writable, whether it is already patched, whether the patch can still be applied to this shell version, and whether a backup exists. Read-only.',
-    parameters: {
-      resources: {
-        type: 'string',
-        description:
-          'Optional install directory that contains app.asar. Omit to let the plugin detect the running shell.',
-      },
-    },
-    output: {
-      schema: { type: 'object' },
-      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
-    },
-    async execute(args) {
-      const requested = args !== undefined && args !== null && typeof args.resources === 'string' ? args.resources : undefined
-      return inspectShell(requested)
-    },
-  }
-  try {
-    const dispose = tools.register(definition)
-    return typeof dispose === 'function' ? dispose : () => {}
-  } catch (error) {
-    void error
-    return undefined
-  }
-}
-
-/**
  * Register the Host-side patch probe and the agent tool.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
@@ -411,7 +350,6 @@ function installTool(ctx) {
 export function apply(ctx) {
   if (ctx === undefined || ctx === null || typeof ctx.effect !== 'function') return
   ctx.effect(() => installHttpProbe(ctx), 'dsh-chat-embed: shell patch probe')
-  ctx.effect(() => installTool(ctx), 'dsh-chat-embed: shell patch tool')
 }
 
 /** Exposed for tests and for the patch checker to reuse without a Context. */
@@ -421,8 +359,7 @@ export const internals = {
   readAsarEntry,
   readRealFile,
   resourcesCandidates,
-  findNodeBinary,
-  findPatchScript,
-  patchCommand,
+  launcherCommand,
+  findPatchFiles,
   PROBE_PATH,
 }

@@ -19,7 +19,6 @@
     "icon.svg",
     "docs",
     "tools/shell-patch",
-    "restore-shell-patch.cmd",
     "清理聊天缓存.cmd",
     "README.md",
     "LICENSE"

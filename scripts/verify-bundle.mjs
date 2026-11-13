@@ -179,11 +179,18 @@ if (clientSource !== undefined) {
       fail('index.js: the probe must read app.asar itself (readAsarEntry)')
     }
   }
-  if (!existsSync(join(root, 'tools/shell-patch/patch-asar.cjs'))) {
-    fail('tools/shell-patch/patch-asar.cjs: the patch tool must ship with the package')
+  // One script, one command per direction, two launchers: that is the whole
+  // surface a user has to touch, so a missing piece is a broken feature.
+  for (const entry of ['shell-patch.mjs', 'shell-patch.cmd', 'shell-patch.command']) {
+    if (!existsSync(join(root, 'tools', 'shell-patch', entry))) {
+      fail('tools/shell-patch/' + entry + ': the patch script must ship with the package')
+    }
   }
   if (!/persistRisk/.test(clientSource) || !/patchInstructions/.test(clientSource)) {
     fail('client.js: the panel must keep the experimental notice and the patch instructions')
+  }
+  if (/startSession\(/.test(clientSource.split('function patchInstructions')[0].split('function copyPatchCommand')[1] || '')) {
+    fail('client.js: handing over the patch must not open a session')
   }
   // Every service must be https and carry its own storage identity.
   const providerBlock = clientSource.match(/const PROVIDERS = Object\.freeze\(\[([\s\S]*?)\]\.map/)

@@ -134,38 +134,41 @@ test('the probe calls out a shell whose patch site is gone', () => {
   assert.match(report.detail, /补丁点不存在/)
 })
 
-test('the probe resolves a Node binary and a runnable command', () => {
+test('the probe names the script and both directions', () => {
   const resources = fakeInstall({ 'lib/main.js': PATCHED_MAIN })
   const report = internals.inspectShell(resources)
 
-  assert.ok(typeof report.nodeBinary === 'string' && report.nodeBinary !== '', 'a Node binary is found')
-  assert.match(report.nodeBinary, /node(\.exe)?$/i)
-  assert.ok(typeof report.patchScript === 'string', 'the patch tool is located inside this package')
-  assert.ok(typeof report.patchCommand === 'string' && report.patchCommand.includes('build'))
-  assert.ok(report.patchCommand.includes('--resources'), 'a detected install is passed explicitly')
-  assert.ok(report.patchCommand.split(' ')[0].startsWith('"') || !report.patchCommand.split(' ')[0].includes(' '), 'a spaced path is quoted')
+  assert.ok(typeof report.launcher === 'string' && report.launcher !== '', 'the launcher ships with the package')
+  assert.match(report.launcher, /shell-patch\.(cmd|command)$/, 'the platform launcher is picked')
+  assert.ok(typeof report.script === 'string' && report.script.endsWith('shell-patch.mjs'), 'the script is located')
+  assert.ok(report.applyCommand.includes('apply'), 'the on direction is one command')
+  assert.ok(report.revertCommand.includes('revert'), 'the off direction is one command')
+  assert.equal(report.nodeBinary, undefined, 'no Node binary to worry about: the launcher finds its own')
 })
 
-test('the command quotes paths that contain spaces', () => {
-  assert.equal(
-    internals.patchCommand('C:\\Program Files\\nodejs\\node.exe', 'C:\\pkg\\tools\\patch.cjs'),
-    '"C:\\Program Files\\nodejs\\node.exe" C:\\pkg\\tools\\patch.cjs build',
-  )
-  assert.equal(
-    internals.patchCommand('C:\\nodejs\\node.exe', 'C:\\pkg\\tools\\patch.cjs'),
-    'C:\\nodejs\\node.exe C:\\pkg\\tools\\patch.cjs build',
-  )
+test('the launcher command quotes a path that contains spaces', () => {
+  assert.equal(internals.launcherCommand('apply', 'C:\\Program Files\\shell-patch.cmd'), '"C:\\Program Files\\shell-patch.cmd" apply')
+  assert.equal(internals.launcherCommand('revert', 'C:\\pkg\\shell-patch.cmd'), 'C:\\pkg\\shell-patch.cmd revert')
+  assert.equal(internals.launcherCommand('apply', undefined), undefined, 'no launcher, no command')
 })
 
-test('the command points the tool at a non-standard install', () => {
-  const command = internals.patchCommand(
-    'C:\\nodejs\\node.exe',
-    'C:\\pkg\\patch-asar.cjs',
-    'E:\\Custom Install\\resources',
-  )
-  assert.match(command, /--resources/, 'the tool only searches the usual locations')
-  assert.match(command, /"E:\\Custom Install\\resources"/, 'a spaced install path is quoted')
-  assert.ok(command.endsWith('"'), 'the path is the last argument')
+test('a backup that is itself patched is reported as such', () => {
+  const resources = fakeInstall({ 'lib/main.js': UNPATCHED_MAIN })
+  // A patched copy sitting at app.asar.orig is what a careless re-patch leaves
+  // behind, and restoring from it silently does nothing.
+  writeFileSync(join(resources, 'app.asar.orig'), buildAsar({ 'lib/main.js': PATCHED_MAIN }))
+
+  const report = internals.inspectShell(resources)
+  assert.equal(report.backup, true, 'the file exists')
+  assert.equal(report.backupClean, false, 'but it is not a restore point')
+})
+
+test('a pristine backup is reported as clean', () => {
+  const resources = fakeInstall({ 'lib/main.js': PATCHED_MAIN })
+  writeFileSync(join(resources, 'app.asar.orig'), buildAsar({ 'lib/main.js': UNPATCHED_MAIN }))
+
+  const report = internals.inspectShell(resources)
+  assert.equal(report.backupClean, true)
 })
 
 test('the probe names a missing install instead of failing', () => {
@@ -207,43 +210,16 @@ test('the probe fetches only GET and HEAD, and never writes', () => {
   }
 })
 
-test('the Host half waits for the services it needs', async () => {
+test('the Host half waits for the service it needs', async () => {
   // The loader calls apply while the tree is still assembling. Without a
-  // declared inject both lookups read undefined and the route and the tool are
-  // skipped without a word — which is how 0.6.9 shipped.
+  // declared inject the lookup reads undefined and the route is skipped without
+  // a word — which is how 0.6.9 shipped.
   const module = await import('../index.js')
-  assert.deepEqual(module.inject, ['webServer', 'tools'], 'both services are declared as dependencies')
+  assert.deepEqual(module.inject, ['webServer'], 'the one service it needs is declared')
   assert.equal(typeof module.apply, 'function', 'the plugin still exports apply')
 })
 
-test('the patch checker registers one read-only agent tool', async () => {
-  const resources = fakeInstall({ 'lib/main.js': PATCHED_MAIN })
-  const registered = []
-  const ctx = {
-    get: (name) =>
-      name === 'tools'
-        ? { register: (definition) => (registered.push(definition), () => {}) }
-        : undefined,
-    effect: (callback) => {
-      const dispose = callback()
-      return typeof dispose === 'function' ? dispose : () => {}
-    },
-  }
-  apply(ctx)
-
-  assert.equal(registered.length, 1, 'one tool is registered')
-  const tool = registered[0]
-  assert.equal(tool.name, 'dsh_chat_embed_patch_check')
-  assert.match(tool.description, /read-only/i, 'the description states that nothing is written')
-
-  const report = await tool.execute({ resources })
-  assert.equal(report.patched, true, 'the tool answers with the same probe')
-  const rendered = tool.output.render({ resources }, report)
-  assert.equal(rendered[0].type, 'text')
-  assert.match(rendered[0].text, /"patched": true/)
-})
-
-test('the tool is optional when the composition has no tool registry', () => {
+test('a Host without a tool registry still loads', () => {
   const ctx = {
     get: () => undefined,
     effect: (callback) => {
