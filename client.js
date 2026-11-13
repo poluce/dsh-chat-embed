@@ -263,8 +263,7 @@ window.__ModuleLoader__.load({
         persistRisk:
           'Experimental: the patch rewrites the app.asar of the desktop shell and needs write access to its install folder. A shell update replaces it, so the patch has to be applied again.',
         persistCheckHint: 'Opens a new session and drafts the check for you',
-        persistActionOn: 'Check',
-        persistActionOff: 'Enable',
+        persistAction: 'Enable',
         persistConfirmTitle: 'Turn on “login across restarts”?',
         persistConfirmNote: 'Continuing opens a new session with the known facts already in the composer — review them and press send.',
         persistConfirmGo: 'Continue',
@@ -359,8 +358,7 @@ window.__ModuleLoader__.load({
         persistHint: '需要桌面壳补丁；插件无法改变壳的分区命名。',
         persistRisk: '实验性功能：补丁会改写桌面壳的 app.asar，需要安装目录的写权限；桌面壳升级会覆盖补丁，需要重新打一次。',
         persistCheckHint: '打开新会话，把检查内容写好，点发送即可',
-        persistActionOn: '检查',
-        persistActionOff: '开启',
+        persistAction: '开启',
         persistConfirmTitle: '开启「重启保持登录」？',
         persistConfirmNote: '点击「继续」会打开一个新会话，把已知信息写进输入框，确认后发送即可。',
         persistConfirmGo: '继续',
@@ -3521,7 +3519,7 @@ window.__ModuleLoader__.load({
                         setConfirmOpen(true)
                       },
                     },
-                    persistenceState() === 'on' ? t('persistActionOn') : t('persistActionOff'),
+                    t('persistAction'),
                   ),
                 ),
                 h(
