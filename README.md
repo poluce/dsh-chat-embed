@@ -330,6 +330,7 @@ node scripts/release.mjs 0.6.7 --summary "..." --dry-run   # 只看计划
 
 | 版本 | 变化 |
 | --- | --- |
+| `0.6.10` | 修好「重启保持登录」整条链路：开关不再因 ctx 作用域错误静默失败、变成可双向切换（开启/还原）、设置菜单两行合一、预填任务说明重写；Host 半补上 inject 依赖，探针路由与 agent 工具终于生效 |
 | `0.6.9` | 设置菜单把「跨重启保持登录」与「检查补丁配置」合成一行（滑动开关 + 确认弹窗 + 新会话引导）；发版改用 OIDC Trusted Publishing，不再保存 npm 令牌，并附带 provenance |
 | `0.6.8` | 去掉单提交策略：发版改为普通提交 + 普通推送，不再 --orphan 重写、reflog expire、gc --prune 与强推；恢复 git log/diff/blame/bisect，发版失败可 reset 回退，并为 OIDC provenance 扫清障碍 |
 | `0.6.7` | 发版脚本：一条命令完成 bump/gate/提交/推送/等 CI/发布/打 tag/建 release；新增 dependabot 自动维护固定 SHA 的 Action |

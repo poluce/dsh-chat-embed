@@ -115,7 +115,7 @@ window.__ModuleLoader__.load({
 let activeCtx = undefined
 
     /** Build identity, surfaced in the panel so a packaged app can be diagnosed. */
-    const BUILD = '0.6.9'
+    const BUILD = '0.6.10'
 
     /** Where a re-applied instance finds the one it must take over from. */
     const INSTANCE_KEY = '__DSH_CHAT_EMBED_INSTANCE__'
