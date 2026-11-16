@@ -184,22 +184,48 @@ node scripts/release.mjs 0.6.14 --summary "一句话"
 
 ## 11. 环境
 
-| 项 | 值 |
-| --- | --- |
-| 本机 Node | v24.3.0（`engines.node >= 22.14.0`，CI 跑 22 与 24） |
-| npm | 11.x（OIDC 需要 ≥ 11.5.1） |
-| git | 2.50 |
-| dsh CLI | `E:\CodeSoftwarel\deepseek_harness\resources\runtime\cli\bin\dsh.cmd` |
-| 本机 profile | `~/.dsh/profiles/desktop`，`node_modules/dsh-chat-embed` 是本仓库的 junction |
-| 桌面壳安装目录 | `E:\CodeSoftwarel\deepseek_harness\resources`（含 `app.asar`，**测试禁止触碰**） |
+不要在这份文件、代码或别的文档里写死本机路径。每个人装 DSH 的位置都不一样，写死的路径除了让下一个人照着改一遍之外没有别的作用。
 
-读 `app.asar` 做只读排查时，用壳自己的运行时跑脚本最接近真实环境：
+| 项 | 需求 / 怎么找 |
+| --- | --- |
+| Node | `>= 22.14.0`（`package.json` 的 `engines`）；CI 跑 22 与 24 |
+| npm | `>= 11.5.1`（OIDC Trusted Publishing 的下限） |
+| git | 任意版本（无 submodule、无 LFS） |
+| dsh CLI | PATH 上的 `dsh`；不在 PATH 就用桌面版自带的那份（见下） |
+| 本机 profile | `~/.dsh/profiles/<profile>`；其中 `node_modules/dsh-chat-embed` 通常是指向本仓库的 junction |
+| 桌面壳安装目录 | **不写死**，用下面三条途径之一 |
+
+### 找到桌面壳安装目录
 
 ```powershell
+# 1. 环境变量：脚本与 Host 都优先认它（跨平台、最省事）
+$env:DSH_RESOURCES = '<安装目录>\resources'
+node tools/shell-patch/shell-patch.mjs status
+
+# 2. 让脚本自己找：按平台常见位置探测，找不到会列出它试过的每个路径
+node tools/shell-patch/shell-patch.mjs status
+
+# 3. DSH 正在运行时，问 Host 的只读探针（最准，web 端口见 GUI 地址栏）
+Invoke-RestMethod 'http://127.0.0.1:<port>/dsh-chat-embed/patch-check' | Select resources, asar, patched
+```
+
+`index.js` 的 `resourcesCandidates()` 已经把 `process.resourcesPath`（Electron 自己就是权威答案）、`$DSH_RESOURCES`、以及各平台常见安装位置都列进去了；**不要为了省一次探测就往代码里加固定路径**。
+
+### 用壳自己的运行时跑脚本
+
+Electron 与普通 Node 的 `fs` 对 `.asar` 的行为不同（§4.1），所以排查只读问题时，用壳的运行时跑一遍最接近真实环境：
+
+```powershell
+# Windows：exe 在 resources 的上一级
+$exe = Join-Path (Split-Path $env:DSH_RESOURCES) 'DeepSeek Harness.exe'
+# macOS：/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness
+
 $env:ELECTRON_RUN_AS_NODE = '1'
-& "E:\CodeSoftwarel\deepseek_harness\DeepSeek Harness.exe" tools/shell-patch/shell-patch.mjs status --resources "E:\CodeSoftwarel\deepseek_harness\resources"
+& $exe tools/shell-patch/shell-patch.mjs status --resources $env:DSH_RESOURCES
 Remove-Item Env:\ELECTRON_RUN_AS_NODE
 ```
+
+> 开关走的就是这条：Host 用 `process.execPath` + `ELECTRON_RUN_AS_NODE` 起脚本，所以「在真实环境里能跑」不是可选项。
 
 ---
 

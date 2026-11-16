@@ -201,8 +201,14 @@ node tools/shell-patch/shell-patch.mjs status    # 只报告，不改文件
 node tools/shell-patch/shell-patch.mjs apply     # 开启
 node tools/shell-patch/shell-patch.mjs revert    # 关闭
 node tools/shell-patch/shell-patch.mjs cache     # 清缓存
-node tools/shell-patch/shell-patch.mjs apply --resources "D:\DeepSeek Harness\resources"
 node tools/shell-patch/shell-patch.mjs apply --restart --pid <DSH 的 PID> --exe "<DSH.exe>"   # 开关走的就是这条
+```
+
+脚本默认会自己找安装目录（Electron 的 `resourcesPath`、`$DSH_RESOURCES`、各平台常见位置）。装在别处就指一下：
+
+```powershell
+$env:DSH_RESOURCES = '<安装目录>/resources'
+node tools/shell-patch/shell-patch.mjs apply
 ```
 
 > 通过 npm 安装时脚本位于 `<profile>/node_modules/<包名>/tools/shell-patch/`；设置菜单里的开关也会告诉你它的确切位置。
