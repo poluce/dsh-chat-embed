@@ -5,7 +5,7 @@
 它只写**不写下来就一定会踩**的东西：哪些约束会真的坏东西、门禁会拦什么、改完怎么验。
 用户向的说明在 [`README.md`](README.md)，内嵌契约与证据在 [`docs/architecture.md`](docs/architecture.md)，发版细节在 [`docs/publishing.md`](docs/publishing.md)。
 
-本文件不随 npm 包发布（`package.json` 的 `files` 白名单里没有它）。
+本文件不随 npm 包发布。包里只有 README 一份文档：`docs/`、`AGENTS.md`、`assets/`、`scripts/`、`test/` 都只存在于仓库；门禁会拦住「又把 `docs` 加进 `files`」。
 
 ---
 
@@ -55,8 +55,10 @@ test/fake-env.mjs             DOM + 桌面壳替身；整套测试的地基
 test/{client,host,shell-patch}.test.mjs
 tools/shell-patch/            补丁三件套：.mjs 全逻辑，.cmd / .command 只找 Node 和转参数
 清理聊天缓存.cmd              一行壳：等价于 shell-patch.cmd cache
-docs/                         架构与发版文档（中文）
+docs/                         架构与发版文档（中文，仅仓库，不进包）
 ```
+
+**包里发什么**由 `package.json` 的 `files` 决定：共 13 个文件，文档只有 README 一份。
 
 ---
 
@@ -120,7 +122,8 @@ React 必须 `require('react')` 拿共享实例——自带一份副本会让 ho
 | --- | --- |
 | `client.js` 里不许出现 `setInterval` | 几何路径必须事件驱动，轮询会烧 CPU |
 | `PROVIDERS` 每个 url 必须 `https://`、workspace 必须唯一 | 分区即登录隔离；重名会让两个服务共用登录态 |
-| `files` 必须列 `docs` | 否则打包后用户看不到文档 |
+| `files` 不许列 `docs`（也不许列别的文档目录） | 包里只发 README 一份文档；目录条目会连将来的草稿一起发出去 |
+| `files` 必须列 `README.md` 与 `LICENSE` | npm 页面上唯一的说明与许可证 |
 | `index.js` 必须有 `PATCH_PATH` 与 `spawnPatcher`，`client.js` 必须有 `startPatchAction` | 丢了就等于悄悄退回「复制命令」 |
 | 交接补丁的路径里不许出现 `startSession` | 补丁不该经过模型判断 |
 | `client.js` 的 `BUILD` 必须等于 `package.json` 的 `version` | 面板版本号撒谎是最常见的发布事故 |

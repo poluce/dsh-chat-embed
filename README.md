@@ -15,23 +15,25 @@
 | 名称 | 说明 |
 | --- | --- |
 | `dsh-chat-embed` | 本插件的包名，也是 dsh 插件管理器里的条目名 |
-| `index.js` | **Host 半侧**（Node）：当前是空壳，只为满足 bundle 的 loader 行；后续若需 Host 配置从这扩展 |
+| `index.js` | **Host 半侧**（Node）：只读探针 + 开关用的执行路由（起停补丁进程，自己不写文件） |
 | `client.js` | **Client 半侧**（浏览器）：多标签、租约握手、内联席位、全部 UI。手写产物，无构建 |
 | `locale/{en,zh}.json` | 插件管理器里显示的标题与简介 |
 | `cordis.patch.yml` | 组合补丁：向 profile 插入 `id: chat-embed` 的 loader 行 |
 | `scripts/verify-bundle.mjs` | 门禁：语法 / 清单 / loader 契约 / 服务注册表 / 显示资源 |
-| `test/` | 纯 Node 契约测试（伪造 DOM + 伪造桌面桥 + 伪造 asar），81 项 |
-| `docs/architecture.md` | 内嵌契约、席位架构、壳补丁、升级复验清单（**接到项目先读这份**） |
+| `test/` | 纯 Node 契约测试（伪造 DOM + 伪造桌面桥 + 伪造 asar） |
+| [`docs/architecture.md`](https://github.com/poluce/dsh-chat-embed/blob/master/docs/architecture.md) | 内嵌契约、席位架构、壳补丁、升级复验清单（**接到项目先读这份**） |
 | `tools/shell-patch/` | 可选的桌面壳补丁：一个脚本管开启 / 关闭 / 清缓存 |
 
 **没有第三方运行时依赖**：`client.js` 直接由 dsh 的模块加载器执行，React 用壳共享的那一份。
+
+> npm 包里**只有 README 一份文档**。`docs/` 与 `AGENTS.md` 是仓库内的维护者材料，不随包发布；下面凡是链到它们的都指向 GitHub。
 
 ### 文档入口
 
 | 想了解 | 读哪里 |
 | --- | --- |
 | 怎么装、怎么用 | 本文件（README） |
-| 为什么这样实现、内嵌契约、升级外壳时的复验清单 | `docs/architecture.md` |
+| 为什么这样实现、内嵌契约、升级外壳时的复验清单 | [`docs/architecture.md`](https://github.com/poluce/dsh-chat-embed/blob/master/docs/architecture.md)（仓库内） |
 | 壳补丁（持久分区 / 关缓存）与回滚 | `tools/shell-patch/shell-patch.cmd`（macOS 用 `.command`） |
 | 门禁与测试覆盖了什么 | `scripts/verify-bundle.mjs`、`test/client.test.mjs` |
 ---
@@ -278,7 +280,7 @@ dsh-chat-embed/
 │   ├── client.test.mjs        # 客户端契约测试
 │   ├── host.test.mjs          # Host 探针与路由测试
 │   └── shell-patch.test.mjs   # 补丁脚本契约测试（合成 asar，不碰真实安装）
-├── docs/
+├── docs/                      # 仓库内，不随 npm 包发布
 │   ├── architecture.md        # 架构与内嵌契约（先读这份）
 │   └── publishing.md          # 维护者：发版、分发与列表投稿
 ├── tools/shell-patch/         # 随 npm 包发布
@@ -289,6 +291,10 @@ dsh-chat-embed/
 ├── LICENSE (MIT)
 └── README.md
 ```
+
+**npm 包里有什么**：`package.json` 的 `files` 白名单决定发布内容——`index.js`、`client.js`、`cordis.patch.yml`、`locale/*.json`、`icon.svg`、`tools/shell-patch/**`、`清理聊天缓存.cmd`、`README.md`、`LICENSE`，共 13 个文件。
+
+`docs/`、`AGENTS.md`、`assets/`、`scripts/`、`test/` 都只存在于仓库，不进包；文档类只发 README 一份。门禁会拦住「又把 `docs` 加回白名单」这种事。
 
 ---
 
@@ -301,7 +307,7 @@ dsh-chat-embed/
 5. **席位接管**：席位挂载即认领 guest；另一席位若仍挂载则显示移交卡片。宿主变化时丢弃旧 guest 并重建（Electron 无法搬移 webview），再用 `startUrlFor()` 回到上次会话地址。
 6. **隔离**：每服务一个 workspace、一个分区、一个 guest、一条租约；一个标签失败不影响其它。
 
-> 想看证据、契约细节与升级检查清单：**[docs/architecture.md](docs/architecture.md)**。
+> 想看证据、契约细节与升级检查清单：**[docs/architecture.md](https://github.com/poluce/dsh-chat-embed/blob/master/docs/architecture.md)**（仓库内，不随 npm 包发布）。
 
 ---
 
@@ -326,7 +332,7 @@ plugin_manager { "action": "install_bundle", "target": "<本仓库克隆路径>"
 
 提交前约定：门禁必须绿；代码注释/提交信息英文，文档中文；同时改 `package.json` 的 `version` 与 `client.js` 的 `BUILD`。
 
-动手前先读 **[AGENTS.md](AGENTS.md)**：三个半侧的职责边界、`app.asar` 必须走 `original-fs`、启动器的编码限制、门禁拦什么、以及七个真实踩过的坑。
+动手前先读 **[AGENTS.md](https://github.com/poluce/dsh-chat-embed/blob/master/AGENTS.md)**（仓库内，不随 npm 包发布）：三个半侧的职责边界、`app.asar` 必须走 `original-fs`、启动器的编码限制、门禁拦什么、以及七个真实踩过的坑。
 
 ### 发布与分发
 
@@ -337,7 +343,7 @@ node scripts/release.mjs 0.6.7 --summary "这次改了什么"
 node scripts/release.mjs 0.6.7 --summary "..." --dry-run   # 只看计划
 ```
 
-发版细节、CI 与 dependabot、插件列表投稿：见 **[docs/publishing.md](docs/publishing.md)**。
+发版细节、CI 与 dependabot、插件列表投稿：见 **[docs/publishing.md](https://github.com/poluce/dsh-chat-embed/blob/master/docs/publishing.md)**（仓库内，不随 npm 包发布）。
 
 ---
 

@@ -17,7 +17,6 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "docs",
     "tools/shell-patch",
     "清理聊天缓存.cmd",
     "README.md",

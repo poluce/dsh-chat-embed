@@ -137,10 +137,14 @@ Get-FileHash $env:TEMP\check\dsh-chat-embed-<版本>.tgz -Algorithm SHA256
 | --- | --- |
 | 仓库 | <https://github.com/poluce/dsh-chat-embed> |
 | Release | <https://github.com/poluce/dsh-chat-embed/releases> |
-| 分发包 | `dsh-chat-embed-0.6.12.tgz`（16 个文件，约 70 kB） |
+| 分发包 | `dsh-chat-embed-0.6.12.tgz`（13 个文件，解包约 268 kB） |
 | npm | `dsh-chat-embed@0.6.12`（<https://www.npmjs.com/package/dsh-chat-embed>，维护者 `poluce_auto`） |
 | 商店图标 | `assets/icon-180.png`（180×180 PNG） |
 | 商店截图 | `assets/screenshots/` + 仓库根 `screenshots.json`（6 张） |
+
+**包里有什么**：`package.json` 的 `files` 白名单决定——运行产物 + `README.md` + `LICENSE`，**文档只发 README 一份**。
+`docs/`、`AGENTS.md`、`assets/`、`scripts/`、`test/` 都留在仓库；门禁会拦住「又把 `docs` 加进 `files`」（目录条目会把将来的草稿一并发布出去）。
+商店用的图标与截图由插件市场从**仓库**读取（`screenshots.json`），不走 npm 包。
 
 ## 分发渠道
 

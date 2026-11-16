@@ -120,12 +120,15 @@ if (pkg !== undefined) {
     for (const required of ['index.js', 'client.js', 'cordis.patch.yml', 'locale/*.json', 'icon.svg']) {
       if (!files.includes(required)) fail(`package.json: "files" must list ${required}`)
     }
-    const hasDocs = files.some((entry) => entry === 'docs' || entry.startsWith('docs/'))
-    if (!hasDocs) fail('package.json: "files" must list docs')
+    // README is the only document the package ships; docs/ is maintainer
+    // material and stays in the repository. A directory entry here would ship
+    // every future draft too, so the gate has to say so out loud.
+    const shipsDocs = files.some((entry) => entry === 'docs' || entry.startsWith('docs/'))
+    if (shipsDocs) fail('package.json: "files" must not ship docs/ (README is the only document)')
     for (const required of ['README.md', 'LICENSE']) {
       if (!files.includes(required)) fail(`package.json: "files" must list ${required}`)
     }
-    if (failures.length === 0) ok(`"files" lists ${files.length} entries`)
+    if (failures.length === 0) ok(`"files" lists ${files.length} entries, README only`)
   }
 }
 
