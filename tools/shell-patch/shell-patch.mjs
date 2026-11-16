@@ -857,6 +857,21 @@ async function revert(resources, options = {}) {
 // Cache cleanup (the other half of the persistent partition)
 // ---------------------------------------------------------------------------
 
+/**
+ * The panel's own workspace identities. Must stay equal to `client.js`
+ * `PROVIDERS` and to the Host's `CHAT_WORKSPACES`: the directory name is
+ * derived from the string, so a drift here deletes the wrong folder or none.
+ */
+const CHAT_WORKSPACES = [
+  'dsh-chat-embed:chat:v1',
+  'dsh-chat-embed:doubao:v1',
+  'dsh-chat-embed:chatgpt:v1',
+  'dsh-chat-embed:minimax:v1',
+  'dsh-chat-embed:kimi:v1',
+  'dsh-chat-embed:gemini:v1',
+  'dsh-chat-embed:grok:v1',
+]
+
 /** Directories Chromium recreates on demand; the login never lives in them. */
 const CACHE_DIRS = [
   'Cache',
@@ -868,6 +883,14 @@ const CACHE_DIRS = [
   'ShaderCache',
   'Shared Dictionary',
 ]
+
+/**
+ * @param {string} workspace
+ * @returns {string} `dsh-sidebar-` plus the same 24 hex chars the patch writes
+ */
+function partitionDirName(workspace) {
+  return 'dsh-sidebar-' + createHash('sha256').update(workspace).digest('hex').slice(0, 24)
+}
 
 /** @returns {string[]} candidate Partitions directories */
 function partitionsCandidates() {
@@ -919,45 +942,64 @@ function sizeOf(dir) {
 }
 
 /**
- * Free the disposable Chromium caches, keep the login.
+ * Clear this plugin's partitions, and nothing else under `Partitions`.
  *
- * The persistent partition is what makes a login survive a restart; it also
- * means a Chromium profile stays on disk, most of which is cache. Cookies,
- * Local Storage and IndexedDB — where a signed-in service actually lives — are
- * never touched here.
+ * The patch decides the depth. While it is on, the running session is the
+ * persistent one, so only disposable caches go — IndexedDB, Local Storage and
+ * `Network` (cookies) stay. While it is off, the shell is using a fresh
+ * in-memory partition and these directories are leftovers; the whole seven are
+ * removed. An unknown sibling is never a candidate, even if its name starts
+ * with `dsh-sidebar-`.
+ *
+ * @param {string} resources install directory, so the archive — not the panel — decides
+ * @returns {number}
  */
-function cleanCache() {
+function cleanChatCache(resources) {
+  const state = inspect(resources)
+  if (state.patched !== true && state.patched !== false) {
+    say('  ✗ 无法判断补丁状态，没有删除任何文件。')
+    return 1
+  }
+  const purge = state.patched !== true
   const base = partitionsCandidates().find((candidate) => existsSync(candidate))
   if (base === undefined) {
     say('  没有找到 Partitions 目录，无需清理。')
     say('  找过这些位置：')
     for (const candidate of partitionsCandidates()) say('    ' + candidate)
-    return 1
+    return 0
   }
-  say('  如果 DSH 正在运行，部分文件会被占用；关掉它再运行一次更彻底。')
+  const allowed = new Set(CHAT_WORKSPACES.map(partitionDirName))
+  say(purge ? '  补丁未开启，将删除这 7 个服务留下的全部分区。' : '  补丁已开启，只删除缓存，登录保留。')
+  say('  ' + base)
+  if (purge) say('  如果 DSH 仍占着这些目录，删不掉的会留在原地。')
   say('')
-  const before = sizeOf(base)
   let freed = 0
-  for (const entry of readdirSync(base, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue
-    const partition = join(base, entry.name)
-    for (const name of CACHE_DIRS) {
-      const target = join(partition, name)
+  let stuck = 0
+  for (const name of allowed) {
+    if (!/^dsh-sidebar-[0-9a-f]{24}$/.test(name)) continue
+    const dir = join(base, name)
+    if (!existsSync(dir)) continue
+    const targets = purge ? [dir] : CACHE_DIRS.map((cacheName) => join(dir, cacheName))
+    for (const target of targets) {
       if (!existsSync(target)) continue
       const size = sizeOf(target)
+      const label = purge ? name : name + '/' + target.slice(dir.length + 1)
       try {
         rmSync(target, { recursive: true, force: true })
         if (!existsSync(target)) freed += size
+        else {
+          stuck += size
+          say('  · ' + label + ' 仍在')
+        }
       } catch (error) {
-        say('  · ' + entry.name + '/' + name + ' 没删掉：' + reasonOf(error))
+        stuck += size
+        say('  · ' + label + ' 没删掉：' + reasonOf(error))
       }
     }
   }
-  const after = sizeOf(base)
-  say('  ' + base)
-  say('  释放 ' + plural(freed) + '，剩余 ' + plural(after) + '（清理前 ' + plural(before) + '）')
-  say('  登录状态、Cookie、LocalStorage 均未改动。')
-  return 0
+  say('  释放 ' + plural(freed) + (stuck > 0 ? '，仍占用 ' + plural(stuck) : ''))
+  if (!purge) say('  登录状态、Cookie、Local Storage、IndexedDB 均未改动。')
+  return stuck > 0 ? 1 : 0
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,7 +1088,7 @@ function usage() {
   say('    status   只报告状态，不改动任何文件')
   say('    apply    开启：让内嵌聊天的登录跨重启保留')
   say('    revert   关闭：还原原版 app.asar')
-  say('    cache    清理聊天页的缓存（登录保留）')
+  say('    cache    清理本面板的分区（开启时只清缓存，关闭时删除残留登录）')
   say('    （不带命令时打开菜单）')
   say('')
   say('    --resources <dir>  指定含 app.asar 的安装目录')
@@ -1074,7 +1116,7 @@ async function menu(resources, options) {
   say('    1) 开启')
   say('    2) 关闭')
   say('    3) 只看状态')
-  say('    4) 清理缓存（登录保留）')
+  say('    4) 清理本面板缓存')
   say('    0) 退出')
   say('')
   const choice = await ask('选择 [0-4]:')
@@ -1106,7 +1148,7 @@ async function menu(resources, options) {
     }
     return revert(resources)
   }
-  if (choice === '4') return cleanCache()
+  if (choice === '4') return cleanChatCache(resources)
   say('  没有这个选项。')
   return 1
 }
@@ -1119,12 +1161,20 @@ async function main() {
       return 0
     }
 
-    // The cache lives under the app's user data, not beside app.asar, so this
-    // one command does not need an install directory at all.
+    // Mode follows the archive, not the panel: a click that still thinks the
+    // patch is off must not wipe a login the running shell is using. That
+    // decision needs the install directory, even though the files themselves
+    // live under the user-data Partitions folder.
     if (options.action === 'cache') {
+      const resources = options.resources !== undefined ? resolve(options.resources) : detectResources()
       say('')
       say('  DSH 聊天页缓存清理')
-      return cleanCache()
+      if (resources === undefined || !existsSync(join(resources, 'app.asar'))) {
+        say('  ✗ 无法判断补丁状态，没有删除任何文件。')
+        say('')
+        return 1
+      }
+      return cleanChatCache(resources)
     }
 
     const resources = options.resources !== undefined ? resolve(options.resources) : detectResources()
@@ -1178,7 +1228,7 @@ async function main() {
     if (options.action === 'status') code = status(resources)
     else if (options.action === 'apply') code = await apply(resources, options)
     else if (options.action === 'revert') code = await revert(resources, options)
-    else if (options.action === 'cache') code = cleanCache()
+    else if (options.action === 'cache') code = cleanChatCache(resources)
     else code = await menu(resources, options)
 
     if (code === 0 && changed) {

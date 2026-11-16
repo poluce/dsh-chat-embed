@@ -1659,6 +1659,19 @@ test('a pending patch asks the user to quit DSH from the tray', async () => {
   assert.match(instance.internals.DICTS.en.patchPendingHint, /12 hours/, 'en names the wait, so a late quit is not a surprise')
 })
 
+test('the cache row names both clears and formats the size the Host reports', async () => {
+  const { internals } = await createInstance()
+  assert.match(internals.DICTS.zh.cacheKeepHint, /登录保留/)
+  assert.match(internals.DICTS.zh.cachePurgeHint, /7 个服务/)
+  assert.match(internals.DICTS.en.cacheKeepHint, /Sign-in data stays/)
+  assert.match(internals.DICTS.en.cachePurgeBody, /seven partitions/)
+  assert.equal(internals.formatCacheBytes(0), '0 B')
+  assert.equal(internals.formatCacheBytes(1536), '1.5 KB')
+  assert.equal(internals.formatCacheBytes(2.5 * 1024 * 1024), '2.5 MB')
+  assert.equal(internals.formatCacheBytes(undefined), '')
+  assert.match(internals.CSS, /\.dce-menu-action\{/, 'the clear control has a style of its own')
+})
+
 test('one row opens a dialog that hands over the script', async () => {
   const { internals } = await createInstance()
   const t = (key) => internals.DICTS.zh[key] ?? key

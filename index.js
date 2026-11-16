@@ -41,6 +41,17 @@ export const inject = ['webServer']
 /** Route the panel fetches for the read-only shell probe. */
 const PROBE_PATH = '/dsh-chat-embed/patch-check'
 
+/** Route the panel fetches for the size of this plugin's own chat partitions. */
+const CACHE_PATH = '/dsh-chat-embed/cache'
+
+/**
+ * Route the panel asks to clear that cache.
+ *
+ * Same constraint as the patch switch: the carrier is GET-only, so the token
+ * from the size route is what keeps a stray GET from deleting anything.
+ */
+const CACHE_CLEAR_PATH = '/dsh-chat-embed/cache-clear'
+
 /**
  * Route the panel asks to actually run the patch script.
  *
@@ -82,6 +93,43 @@ const PATCH_TASK = 'dsh-chat-embed-patch'
  * The panel copy says "12 hours". Change both together.
  */
 const PATCH_WAIT_MINUTES = 720
+
+/**
+ * The panel's own workspace identities.
+ *
+ * The shell names a persistent partition `dsh-sidebar-` plus the first 24 hex
+ * characters of sha256(workspace). These seven strings are the only identities
+ * this plugin asks for (`client.js` `PROVIDERS`). A size or a delete that
+ * walked every directory under `Partitions` would take the shell's own sidebar
+ * browser with it — one such directory is already on disk and is not ours.
+ */
+const CHAT_WORKSPACES = Object.freeze([
+  'dsh-chat-embed:chat:v1',
+  'dsh-chat-embed:doubao:v1',
+  'dsh-chat-embed:chatgpt:v1',
+  'dsh-chat-embed:minimax:v1',
+  'dsh-chat-embed:kimi:v1',
+  'dsh-chat-embed:gemini:v1',
+  'dsh-chat-embed:grok:v1',
+])
+
+/**
+ * Chromium directories that are cache, not a login.
+ *
+ * Cookies live in `Network`, the session in `IndexedDB` and `Local Storage`.
+ * None of those names are here. `File System` and `Session Storage` are site
+ * data too, so they stay when the patch is on and go only with a full purge.
+ */
+const CACHE_DIR_NAMES = Object.freeze([
+  'Cache',
+  'Code Cache',
+  'GPUCache',
+  'DawnGraphiteCache',
+  'DawnWebGPUCache',
+  'GrShaderCache',
+  'ShaderCache',
+  'Shared Dictionary',
+])
 
 /** Strings that identify the patch in a rebuilt archive. */
 const PATCH_MARK = 'persist:dsh-sidebar-'
@@ -420,6 +468,208 @@ function inspectShell(resources) {
   return report
 }
 
+/**
+ * Directory name the shell uses for one persistent workspace.
+ *
+ * @param {string} workspace
+ * @returns {string}
+ */
+function partitionDirName(workspace) {
+  return 'dsh-sidebar-' + createHash('sha256').update(workspace).digest('hex').slice(0, 24)
+}
+
+/** @returns {string | undefined} the Partitions directory, if one can be named */
+function partitionsDir() {
+  if (typeof process.env.DSH_PARTITIONS === 'string' && process.env.DSH_PARTITIONS !== '') {
+    return process.env.DSH_PARTITIONS
+  }
+  const appData =
+    process.platform === 'win32'
+      ? process.env.APPDATA
+      : process.platform === 'darwin'
+        ? join(homedir(), 'Library', 'Application Support')
+        : process.env.XDG_CONFIG_HOME !== undefined && process.env.XDG_CONFIG_HOME !== ''
+          ? process.env.XDG_CONFIG_HOME
+          : join(homedir(), '.config')
+  if (appData === undefined || appData === '') return undefined
+  const primary = join(appData, '@deepseek-ai', 'dsh-desktop', 'Partitions')
+  if (existsSync(primary)) return primary
+  const alternate = join(appData, 'DeepSeek Harness', 'Partitions')
+  if (existsSync(alternate)) return alternate
+  return primary
+}
+
+/** @param {string} dir @returns {number} */
+function directoryBytes(dir) {
+  let total = 0
+  const walk = (path) => {
+    let entries
+    try {
+      entries = readdirSync(path, { withFileTypes: true })
+    } catch (error) {
+      void error
+      return
+    }
+    for (const entry of entries) {
+      const next = join(path, entry.name)
+      if (entry.isDirectory()) walk(next)
+      else {
+        try {
+          total += statSync(next).size
+        } catch (error) {
+          void error
+        }
+      }
+    }
+  }
+  walk(dir)
+  return total
+}
+
+/**
+ * Bytes the clear button would remove, and which kind of clear that is.
+ *
+ * `keep` (patch on) sums only {@link CACHE_DIR_NAMES} inside the seven known
+ * partitions. `purge` (patch off) sums those partitions whole, because they
+ * are leftovers the running in-memory session no longer opens. An unknown
+ * sibling is never counted.
+ *
+ * @param {boolean} patched
+ * @param {string} [base] partition root; tests pass their own
+ * @returns {{ bytes: number, mode: 'keep' | 'purge', dir: string | undefined }}
+ */
+function measureChatCache(patched, base) {
+  const root = base !== undefined ? base : partitionsDir()
+  const mode = patched ? 'keep' : 'purge'
+  let bytes = 0
+  if (root !== undefined && existsSync(root)) {
+    for (const workspace of CHAT_WORKSPACES) {
+      const dir = join(root, partitionDirName(workspace))
+      if (!existsSync(dir)) continue
+      if (mode === 'keep') {
+        for (const name of CACHE_DIR_NAMES) bytes += directoryBytes(join(dir, name))
+      } else bytes += directoryBytes(dir)
+    }
+  }
+  return { bytes, mode, dir: root }
+}
+
+/**
+ * Whether the installed shell currently has the persist patch.
+ *
+ * Reads one archive entry, not a content hash of the whole file: the panel
+ * asks for this when the settings menu opens.
+ *
+ * @param {string} [resources]
+ * @returns {boolean | undefined}
+ */
+function readPatchState(resources) {
+  const resolved = typeof resources === 'string' && resources !== '' ? resources : detectResources()
+  if (resolved === undefined) return undefined
+  const asar = join(resolved, 'app.asar')
+  if (!existsReal(asar)) return undefined
+  try {
+    const main = readAsarEntry(asar, 'lib/main.js')
+    if (main === undefined) return undefined
+    return main.includes(PATCH_MARK)
+  } catch (error) {
+    void error
+    return undefined
+  }
+}
+
+/**
+ * Facts the cache row renders. Read-only.
+ *
+ * @param {string} [resources]
+ * @param {(patched: boolean, base?: string) => { bytes: number, mode: string, dir: string | undefined }} [measure]
+ * @returns {object}
+ */
+function cacheReport(resources, measure = measureChatCache) {
+  const resolved = typeof resources === 'string' && resources !== '' ? resources : detectResources()
+  const files = findPatchFiles()
+  const patched = resolved === undefined ? undefined : readPatchState(resolved)
+  if (patched !== true && patched !== false) {
+    return {
+      ok: false,
+      patched,
+      mode: 'unknown',
+      bytes: 0,
+      resources: resolved,
+      script: files.script,
+      detail: '无法判断补丁状态，没有测量缓存',
+    }
+  }
+  const measured = measure(patched)
+  return {
+    ok: true,
+    patched,
+    mode: measured.mode,
+    bytes: measured.bytes,
+    resources: resolved,
+    script: files.script,
+    detail: '',
+  }
+}
+
+/**
+ * Ask the script to clear this plugin's partitions. This module does not delete.
+ *
+ * The script re-reads the archive and chooses keep-or-purge itself, so a stale
+ * panel cannot turn a cache clear into a login wipe.
+ *
+ * @param {object} report
+ * @param {typeof spawnSync} [run]
+ * @param {(patched: boolean) => { bytes: number, mode: string }} [measure]
+ * @returns {object}
+ */
+function clearChatCache(report, run = spawnSync, measure = measureChatCache) {
+  if (report === undefined || report === null || (report.patched !== true && report.patched !== false)) {
+    return { ok: false, state: 'failed', detail: '无法判断补丁状态，没有删除任何文件', bytes: 0, mode: 'unknown', freed: 0 }
+  }
+  if (typeof report.script !== 'string' || report.script === '') {
+    return { ok: false, state: 'failed', detail: '找不到补丁脚本（tools/shell-patch）', bytes: 0, mode: 'unknown', freed: 0 }
+  }
+  if (typeof report.resources !== 'string' || report.resources === '') {
+    return { ok: false, state: 'noapp', detail: '没有找到 DSH 安装目录', bytes: 0, mode: 'unknown', freed: 0 }
+  }
+  const before = measure(report.patched === true)
+  const node = findNodeBinary()
+  const exec = node ?? process.execPath
+  const env = { ...process.env }
+  if (node === undefined) env.ELECTRON_RUN_AS_NODE = '1'
+  let result
+  try {
+    result = run(exec, [report.script, 'cache', '--resources', report.resources], {
+      encoding: 'utf8',
+      timeout: 60000,
+      windowsHide: true,
+      env,
+    })
+  } catch (error) {
+    return {
+      ok: false,
+      state: 'failed',
+      detail: firstLine(error),
+      bytes: before.bytes,
+      mode: before.mode,
+      freed: 0,
+    }
+  }
+  const after = measure(report.patched === true)
+  const output = result !== undefined && result !== null && typeof result.stdout === 'string' ? result.stdout : ''
+  const err = result !== undefined && result !== null && typeof result.stderr === 'string' ? result.stderr : ''
+  const ok = result !== undefined && result !== null && result.status === 0
+  return {
+    ok,
+    state: ok ? 'cleared' : 'failed',
+    mode: before.mode,
+    bytes: after.bytes,
+    freed: Math.max(0, before.bytes - after.bytes),
+    detail: ok ? '' : firstLine((err + '\n' + output).trim() || '清理没有完成'),
+  }
+}
+
 /** @param {unknown} error @returns {string} */
 function firstLine(error) {
   const text = error instanceof Error ? error.message : String(error)
@@ -687,7 +937,7 @@ function spawnPatcher(action, report, spawnProcess, run = spawnSync, platform = 
  * exit and then does the swap and the relaunch; this half never writes a byte.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{ inspect?: () => object, spawn?: typeof spawn, run?: typeof spawnSync }} [deps] test seams
+ * @param {{ inspect?: () => object, spawn?: typeof spawn, run?: typeof spawnSync, measure?: typeof measureChatCache, cache?: () => object }} [deps] test seams
  * @returns {(() => void) | undefined} a disposer, or undefined without a webserver
  */
 function installHttpRoutes(ctx, deps = {}) {
@@ -697,8 +947,12 @@ function installHttpRoutes(ctx, deps = {}) {
   const spawnProcess = typeof deps.spawn === 'function' ? deps.spawn : spawn
   const run = typeof deps.run === 'function' ? deps.run : spawnSync
   const platform = typeof deps.platform === 'string' ? deps.platform : process.platform
+  const measure = typeof deps.measure === 'function' ? deps.measure : measureChatCache
+  const describeCache = typeof deps.cache === 'function' ? deps.cache : () => cacheReport(undefined, measure)
   /** The patcher this panel started, so a second click replaces it. */
   let waiting
+  /** A clear already in flight; a second click must not start another delete. */
+  let clearing = false
 
   const stopWaiting = () => {
     if (waiting === undefined) return
@@ -771,9 +1025,58 @@ function installHttpRoutes(ctx, deps = {}) {
     },
   }
 
+  const cache = {
+    kind: 'exact',
+    path: CACHE_PATH,
+    resource(request) {
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        return new Response('method not allowed', { status: 405, headers: { allow: 'GET, HEAD' } })
+      }
+      let body
+      try {
+        body = JSON.stringify({ ...describeCache(), token: PATCH_TOKEN })
+      } catch (error) {
+        body = JSON.stringify({ ok: false, mode: 'unknown', bytes: 0, detail: firstLine(error), token: PATCH_TOKEN })
+      }
+      return new Response(request.method === 'HEAD' ? null : body, {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+      })
+    },
+  }
+
+  const cacheClear = {
+    kind: 'exact',
+    path: CACHE_CLEAR_PATH,
+    resource(request) {
+      if (request.method !== 'GET') {
+        return new Response('method not allowed', { status: 405, headers: { allow: 'GET' } })
+      }
+      let url
+      try {
+        url = new URL(request.url)
+      } catch (error) {
+        return jsonResponse({ ok: false, state: 'bad-request', detail: firstLine(error) }, 400)
+      }
+      if (url.searchParams.get(TOKEN_PARAM) !== PATCH_TOKEN) {
+        return jsonResponse({ ok: false, state: 'forbidden', detail: '缺少或不匹配的 token' }, 403)
+      }
+      if (clearing) return jsonResponse({ ok: false, state: 'busy', detail: '正在清理', bytes: 0, mode: 'unknown', freed: 0 })
+      clearing = true
+      try {
+        const described = describeCache()
+        return jsonResponse(clearChatCache(described, run, measure))
+      } catch (error) {
+        return jsonResponse({ ok: false, state: 'failed', detail: firstLine(error), bytes: 0, mode: 'unknown', freed: 0 })
+      } finally {
+        clearing = false
+      }
+    },
+  }
+
   const disposers = []
   try {
-    for (const route of [probe, action]) {
+    for (const route of [probe, action, cache, cacheClear]) {
       const dispose = server.register(route)
       if (typeof dispose === 'function') disposers.push(dispose)
     }
@@ -835,7 +1138,15 @@ export const internals = {
   startPatchTask,
   PATCH_TASK,
   PATCH_WAIT_MINUTES,
+  CHAT_WORKSPACES,
+  CACHE_DIR_NAMES,
+  partitionDirName,
+  measureChatCache,
+  cacheReport,
+  clearChatCache,
   PROBE_PATH,
+  CACHE_PATH,
+  CACHE_CLEAR_PATH,
   PATCH_PATH,
   PATCH_TOKEN,
 }

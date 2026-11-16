@@ -128,6 +128,7 @@ this.configureSession(session.fromPartition(partition, { cache: false }))
 | 项 | 结果 |
 | --- | --- |
 | 分区位置 | `<userData>/Partitions/dsh-sidebar-<sha256(workspace)[0..24]>/` |
+| 清空 | 只动这 7 个 workspace 算出的目录。补丁开启时只删 `Cache` 等非登录目录；关闭时整份删除。未知同级目录不碰 |
 | 跨重启登录 | ✅ 首次重启需登录一次，之后免登录 |
 | 单次启动写入 | ≈13 MB → ≈0.09 MB（`Cache` 零新增，`Code Cache` 约 0.02 MB） |
 | 副作用 | 壳自带右侧栏浏览器也变成持久分区 |

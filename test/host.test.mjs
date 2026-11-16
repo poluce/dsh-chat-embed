@@ -275,7 +275,7 @@ test('the probe answers GET and HEAD and nothing else, and writes nothing', () =
     const { mounted, ctx } = routeContext()
     apply(ctx)
 
-    assert.equal(mounted.length, 2, 'the probe and the action route are both registered')
+    assert.equal(mounted.length, 4, 'the probe, the action, and the two cache routes are registered')
     const route = routeAt(mounted, internals.PROBE_PATH)
     assert.ok(route !== undefined, 'the probe keeps its path')
     assert.equal(route.kind, 'exact')
@@ -637,4 +637,76 @@ test('on Windows the click goes to Task Scheduler, not to a doomed child process
   assert.equal(spawned.length, 0, 'no plain child: that one does not survive the quit')
   assert.equal(runs.length, 1)
   assert.equal(runs[0].program, 'powershell.exe')
+})
+
+test('chat cache measurement stays inside the seven workspaces', () => {
+  const base = mkdtempSync(join(tmpdir(), 'dshce-parts-'))
+  scratch.push(base)
+  const ours = join(base, internals.partitionDirName('dsh-chat-embed:chat:v1'))
+  mkdirSync(join(ours, 'Cache'), { recursive: true })
+  writeFileSync(join(ours, 'Cache', 'a'), '12345')
+  mkdirSync(join(ours, 'IndexedDB'), { recursive: true })
+  writeFileSync(join(ours, 'IndexedDB', 'login'), 'secret-login')
+  const other = join(base, 'dsh-sidebar-60fc2da7e0a91f7e53854114', 'Cache')
+  mkdirSync(other, { recursive: true })
+  writeFileSync(join(other, 'x'), '99999')
+
+  const keep = internals.measureChatCache(true, base)
+  assert.equal(keep.mode, 'keep')
+  assert.equal(keep.bytes, 5, 'only the disposable cache is counted while the patch is on')
+  const purge = internals.measureChatCache(false, base)
+  assert.equal(purge.mode, 'purge')
+  assert.equal(purge.bytes, 5 + 'secret-login'.length, 'a purge counts the whole known partition, not the sibling')
+})
+
+test('the measured workspaces are exactly the panel providers', () => {
+  const client = readFileSync(fileURLToPath(new URL('../client.js', import.meta.url)), 'utf8')
+  const found = [...client.matchAll(/workspace: '([^']+)'/g)].map((match) => match[1])
+  assert.deepEqual(found, [...internals.CHAT_WORKSPACES])
+  const script = readFileSync(fileURLToPath(new URL('../tools/shell-patch/shell-patch.mjs', import.meta.url)), 'utf8')
+  for (const workspace of internals.CHAT_WORKSPACES) {
+    assert.ok(script.includes("'" + workspace + "'"), 'the script deletes the same identity: ' + workspace)
+  }
+})
+
+test('clearing cache is a script the Host starts, and a bare GET cannot', async () => {
+  const { mounted, ctx } = routeContext()
+  const calls = []
+  internals.installHttpRoutes(ctx, {
+    cache: () => ({
+      ok: true,
+      patched: false,
+      mode: 'purge',
+      bytes: 40,
+      resources: 'C:\\r\\resources',
+      script: 'C:\\r\\shell-patch.mjs',
+      detail: '',
+    }),
+    measure: () => ({ bytes: 0, mode: 'purge' }),
+    run: (program, args) => {
+      calls.push({ program, args })
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  const size = routeAt(mounted, internals.CACHE_PATH)
+  const clear = routeAt(mounted, internals.CACHE_CLEAR_PATH)
+  assert.ok(size !== undefined && clear !== undefined)
+
+  const listed = await size.resource(new Request('http://127.0.0.1' + size.path), undefined).json()
+  assert.equal(listed.bytes, 40)
+  assert.equal(listed.mode, 'purge')
+  assert.equal(typeof listed.token, 'string')
+
+  const refused = await clear
+    .resource(new Request('http://127.0.0.1' + clear.path), undefined)
+    .json()
+  assert.equal(refused.ok, false)
+  assert.equal(calls.length, 0, 'no token, no delete')
+
+  const done = await clear
+    .resource(new Request('http://127.0.0.1' + clear.path + '?token=' + listed.token), undefined)
+    .json()
+  assert.equal(done.ok, true)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].args.slice(1), ['cache', '--resources', 'C:\\r\\resources'])
 })

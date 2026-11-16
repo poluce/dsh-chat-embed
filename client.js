@@ -297,6 +297,17 @@ let activeCtx = undefined
         patchScriptMissing: 'The patch script is not in this install (tools/shell-patch). The plugin may live elsewhere, or the package is incomplete.',
         patchNoSite: 'This shell version has no patch site, so the script needs updating too; running it only reports that and changes nothing.',
         patchRestartHint: 'Restart DSH afterwards for the change to take effect.',
+        cacheLabel: 'Cache',
+        cacheClear: 'Clear',
+        cacheClearing: 'Clearing…',
+        cacheKeepHint: 'Login across restarts is on: only disposable cache is removed. Sign-in data stays.',
+        cachePurgeHint: 'Login across restarts is off: this deletes the leftover sign-in data of these seven services.',
+        cachePurgeTitle: 'Delete leftover sign-in data?',
+        cachePurgeBody:
+          'The patch is off. This removes the seven partitions that belong to this panel, including their saved sign-ins. It does not touch DSH’s own sign-in, or any other partition.',
+        cachePurgeGo: 'Delete',
+        cacheUnavailable: 'unavailable',
+        cacheFailed: 'Could not clear:',
         copyDiag: 'Copy diagnostics',
         copied: 'Copied',
         copyFailed: 'Copy failed',
@@ -393,6 +404,17 @@ let activeCtx = undefined
         patchScriptMissing: '这个安装里找不到补丁脚本（tools/shell-patch）。插件可能装在别处，或包不完整。',
         patchNoSite: '当前桌面壳版本里找不到补丁点，脚本也需要更新；运行它只会报告这一点，不会改动文件。',
         patchRestartHint: '运行后请重新打开 DSH 使其生效。',
+        cacheLabel: '缓存',
+        cacheClear: '清空',
+        cacheClearing: '正在清空…',
+        cacheKeepHint: '重启保持登录已开启：只删除缓存，登录保留。',
+        cachePurgeHint: '重启保持登录已关闭：将删除这 7 个服务留下的登录数据。',
+        cachePurgeTitle: '删除残留登录？',
+        cachePurgeBody:
+          '补丁已关闭。这会删除本面板自己的 7 个分区，包括其中的登录。不会动 DSH 自己的登录，也不会动其他分区。',
+        cachePurgeGo: '删除',
+        cacheUnavailable: '无法测量',
+        cacheFailed: '没能清空：',
         copyDiag: '复制诊断信息',
         copied: '已复制',
         copyFailed: '复制失败',
@@ -2525,6 +2547,21 @@ let activeCtx = undefined
     }
 
     /**
+     * Compact size for the cache row. Unknown stays blank so the row can say
+     * "unavailable" instead of pretending the cache is empty.
+     *
+     * @param {unknown} bytes
+     * @returns {string}
+     */
+    function formatCacheBytes(bytes) {
+      const value = typeof bytes === 'number' ? bytes : Number(bytes)
+      if (!Number.isFinite(value) || value < 0) return ''
+      if (value >= 1024 * 1024) return (value / (1024 * 1024)).toFixed(1) + ' MB'
+      if (value >= 1024) return (value / 1024).toFixed(1) + ' KB'
+      return String(Math.round(value)) + ' B'
+    }
+
+    /**
      * The clipboard copy behind "copy the patch instructions": what to run,
      * where the tool is, and how to replace the archive safely.
      *
@@ -2982,6 +3019,9 @@ let activeCtx = undefined
       '.dce-card[data-modal="true"]{z-index:8}',
       '.dce-menu-item{display:flex;align-items:center;justify-content:flex-start;gap:8px;width:100%;box-sizing:border-box;padding:6px 8px;border:0;border-radius:6px;background:transparent;color:inherit;font-size:13px;text-align:left;cursor:pointer}',
       '.dce-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
+      '.dce-menu-action{flex:0 0 auto;border:0;border-radius:6px;padding:3px 8px;background:transparent;color:inherit;font-size:12px;cursor:pointer}',
+      '.dce-menu-action:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.18))}',
+      '.dce-menu-action:disabled{opacity:.45;cursor:default}',
       '.dce-right-title{display:inline-flex;align-items:center;gap:6px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dce-right-dot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-success-primary,#19a15f);flex:0 0 auto}',
       '.dce-right-dot[data-phase="failed"]{background:var(--dsw-alias-state-error-primary,#d33)}',
@@ -3401,6 +3441,9 @@ let activeCtx = undefined
       const [barOpen, setBarOpen] = React.useState(false)
       const [menuOpen, setMenuOpen] = React.useState(false)
       const [confirmOpen, setConfirmOpen] = React.useState(false)
+      const [cacheReport, setCacheReport] = React.useState(undefined)
+      const [cacheBusy, setCacheBusy] = React.useState(false)
+      const [cacheConfirm, setCacheConfirm] = React.useState(false)
       const [confirmError, setConfirmError] = React.useState('')
       const [confirmMode, setConfirmMode] = React.useState('on')
       // Why the dialog is open at all: the action could not start, and this
@@ -3422,6 +3465,68 @@ let activeCtx = undefined
        */
       const closeMenu = () => {
         setMenuOpen(false)
+      }
+
+      /**
+       * Ask the Host how much of this panel's partitions the clear button would
+       * remove. Opening the menu is the event; nothing polls.
+       */
+      const refreshCache = () => {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 4000)
+        fetch('./dsh-chat-embed/cache', {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+          .then((response) => (response.ok ? response.json() : undefined))
+          .then((body) => {
+            setCacheReport(body)
+          })
+          .catch((error) => {
+            setCacheReport(undefined)
+            log('warn', 'cache: size route did not answer: ' + messageOf(error))
+          })
+          .finally(() => {
+            clearTimeout(timer)
+          })
+      }
+
+      /**
+       * Start the script. The Host does not delete; the script re-reads the
+       * archive and refuses to touch any partition that is not one of the seven.
+       */
+      const requestCacheClear = () => {
+        const info = cacheReport !== undefined && cacheReport !== null ? cacheReport : {}
+        const token = typeof info.token === 'string' ? info.token : ''
+        if (token === '' || cacheBusy) return
+        setCacheBusy(true)
+        setCacheConfirm(false)
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 60000)
+        fetch('./dsh-chat-embed/cache-clear?token=' + encodeURIComponent(token), {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+          .then((response) => (response.ok ? response.json() : undefined))
+          .then((body) => {
+            if (body === undefined || body === null) {
+              setCacheReport({ ...info, detail: t('cacheFailed') })
+              return
+            }
+            setCacheReport({ ...info, ...body, token })
+          })
+          .catch((error) => {
+            setCacheReport({ ...info, ok: false, detail: messageOf(error) })
+            log('warn', 'cache: clear did not finish: ' + messageOf(error))
+          })
+          .finally(() => {
+            clearTimeout(timer)
+            setCacheBusy(false)
+          })
       }
       const [copyState, setCopyState] = React.useState('')
       const barTimerRef = React.useRef(0)
@@ -3614,7 +3719,10 @@ let activeCtx = undefined
                   'aria-expanded': menuOpen ? 'true' : 'false',
                   onClick: () => {
                     if (menuOpen) closeMenu()
-                    else setMenuOpen(true)
+                    else {
+                      setMenuOpen(true)
+                      refreshCache()
+                    }
                     openBar()
                   },
                 },
@@ -3697,6 +3805,59 @@ let activeCtx = undefined
                       )
                     },
                   }),
+                ),
+                h(
+                  'div',
+                  { className: 'dce-menu-row', 'data-cache-row': 'true' },
+                  h(
+                    'span',
+                    {
+                      className: 'dce-menu-label',
+                      title:
+                        cacheReport !== undefined && cacheReport !== null && cacheReport.mode === 'keep'
+                          ? t('cacheKeepHint')
+                          : cacheReport !== undefined && cacheReport !== null && cacheReport.mode === 'purge'
+                            ? t('cachePurgeHint')
+                            : t('cacheUnavailable'),
+                    },
+                    t('cacheLabel') +
+                      ' ' +
+                      (cacheReport === undefined || cacheReport === null || cacheReport.ok !== true
+                        ? t('cacheUnavailable')
+                        : formatCacheBytes(cacheReport.bytes)),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dce-menu-action',
+                      'data-cache-clear': 'true',
+                      disabled:
+                        cacheBusy ||
+                        cacheReport === undefined ||
+                        cacheReport === null ||
+                        cacheReport.ok !== true ||
+                        cacheReport.bytes === 0,
+                      title:
+                        cacheReport !== undefined &&
+                        cacheReport !== null &&
+                        typeof cacheReport.detail === 'string' &&
+                        cacheReport.detail !== ''
+                          ? t('cacheFailed') + ' ' + cacheReport.detail
+                          : cacheReport !== undefined && cacheReport !== null && cacheReport.mode === 'purge'
+                            ? t('cachePurgeHint')
+                            : t('cacheKeepHint'),
+                      onClick: () => {
+                        if (cacheReport !== undefined && cacheReport !== null && cacheReport.mode === 'purge') {
+                          closeMenu()
+                          setCacheConfirm(true)
+                          return
+                        }
+                        requestCacheClear()
+                      },
+                    },
+                    cacheBusy ? t('cacheClearing') : t('cacheClear'),
+                  ),
                 ),
                 h(
                   'button',
@@ -3798,6 +3959,54 @@ let activeCtx = undefined
                       },
                     },
                     t('persistConfirmGo'),
+                  ),
+                ),
+              )
+            : null,
+          cacheConfirm
+            ? h('div', {
+                className: 'dce-confirm-scrim',
+                onPointerDown: () => setCacheConfirm(false),
+              })
+            : null,
+          cacheConfirm
+            ? h(
+                'div',
+                {
+                  className: 'dce-card',
+                  role: 'dialog',
+                  'aria-modal': 'true',
+                  'data-modal': 'true',
+                  'data-cache-confirm': 'true',
+                  'aria-label': t('cachePurgeTitle'),
+                },
+                h('div', { className: 'dce-card-title' }, t('cachePurgeTitle')),
+                h('div', { className: 'dce-card-body' }, t('cachePurgeBody')),
+                h(
+                  'div',
+                  { className: 'dce-card-actions' },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dce-button',
+                      'data-cache-cancel': 'true',
+                      onClick: () => setCacheConfirm(false),
+                    },
+                    t('persistConfirmCancel'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dce-button dce-button-primary',
+                      'data-cache-confirm-go': 'true',
+                      disabled: cacheBusy,
+                      onClick: () => {
+                        requestCacheClear()
+                      },
+                    },
+                    t('cachePurgeGo'),
                   ),
                 ),
               )
@@ -4051,6 +4260,7 @@ let activeCtx = undefined
         updateSurface,
         getLogging,
         persistenceState,
+        formatCacheBytes,
         readPersistedSeen,
         storePersistenceSeen,
         livePartitionState,

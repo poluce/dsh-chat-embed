@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test, { afterEach } from 'node:test'
@@ -113,11 +113,12 @@ function install(buffer) {
  * @param {string[]} args
  * @returns {{ code: number, out: string }}
  */
-function run(args) {
+function run(args, extraEnv) {
   const result = spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 60000,
+    env: extraEnv === undefined ? process.env : { ...process.env, ...extraEnv },
   })
   return { code: result.status === null ? -1 : result.status, out: (result.stdout || '') + (result.stderr || '') }
 }
@@ -531,4 +532,67 @@ test('the Windows launcher stays inside the console codepage', () => {
   const launcher = readFileSync(join(here, '..', 'tools', 'shell-patch', 'shell-patch.cmd'))
   const high = [...launcher].filter((byte) => byte > 127)
   assert.deepEqual(high, [], 'the batch file is pure ASCII')
+})
+
+/** @param {string} workspace @returns {string} */
+function partitionName(workspace) {
+  return 'dsh-sidebar-' + createHash('sha256').update(workspace).digest('hex').slice(0, 24)
+}
+
+/**
+ * @param {string} root
+ * @param {string} name
+ * @param {Record<string, string>} files relative path → contents
+ */
+function plantPartition(root, name, files) {
+  for (const [relative, content] of Object.entries(files)) {
+    const file = join(root, name, relative)
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, content)
+  }
+}
+
+test('cache while the patch is off deletes only this panel’s partitions', () => {
+  const dir = install(buildAsar(ENTRIES))
+  const parts = mkdtempSync(join(tmpdir(), 'dshce-parts-'))
+  scratch.push(parts)
+  const ours = partitionName('dsh-chat-embed:chat:v1')
+  plantPartition(parts, ours, { 'IndexedDB/login': 'secret', 'Cache/blob': '12345' })
+  plantPartition(parts, 'dsh-sidebar-60fc2da7e0a91f7e53854114', { 'IndexedDB/other': 'leave-me' })
+
+  const { code, out } = run(['cache', '--resources', dir], { DSH_PARTITIONS: parts })
+
+  assert.equal(code, 0, out)
+  assert.match(out, /全部分区/)
+  assert.equal(existsSync(join(parts, ours)), false, 'our leftover partition is gone')
+  assert.equal(
+    readFileSync(join(parts, 'dsh-sidebar-60fc2da7e0a91f7e53854114', 'IndexedDB', 'other'), 'utf8'),
+    'leave-me',
+    'a sibling that is not one of the seven is untouched',
+  )
+})
+
+test('cache while the patch is on leaves the login stores', () => {
+  const dir = install(buildAsar(ENTRIES))
+  assert.equal(run(['apply', '--resources', dir, '--yes']).code, 0)
+  const parts = mkdtempSync(join(tmpdir(), 'dshce-parts-'))
+  scratch.push(parts)
+  const ours = partitionName('dsh-chat-embed:chatgpt:v1')
+  plantPartition(parts, ours, {
+    'IndexedDB/login': 'secret',
+    'Local Storage/level': 'also-secret',
+    'Network/Cookies': 'cookie',
+    'Cache/blob': '12345',
+    'Code Cache/js': 'bytecode',
+  })
+
+  const { code, out } = run(['cache', '--resources', dir], { DSH_PARTITIONS: parts })
+
+  assert.equal(code, 0, out)
+  assert.match(out, /只删除缓存/)
+  assert.equal(existsSync(join(parts, ours, 'Cache')), false, 'the disposable cache is gone')
+  assert.equal(existsSync(join(parts, ours, 'Code Cache')), false)
+  assert.equal(readFileSync(join(parts, ours, 'IndexedDB', 'login'), 'utf8'), 'secret')
+  assert.equal(readFileSync(join(parts, ours, 'Local Storage', 'level'), 'utf8'), 'also-secret')
+  assert.equal(readFileSync(join(parts, ours, 'Network', 'Cookies'), 'utf8'), 'cookie')
 })

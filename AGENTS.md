@@ -136,7 +136,7 @@ React 必须 `require('react')` 拿共享实例——自带一份副本会让 ho
 
 **生效方式**：`client.js` 热更新（刷新页面即可）；`index.js` 改了**必须重启 DSH**。本机 profile 是指向本仓库的 junction，所以改完不用重装。
 
-**加一个聊天服务**：只往 `client.js` 的 `PROVIDERS` 追加一条（`id` / `label` / `url` / `origin` / 唯一 `workspace`），别处不用动。
+**加一个聊天服务**：往 `client.js` 的 `PROVIDERS` 追加一条（`id` / `label` / `url` / `origin` / 唯一 `workspace`），并把同一个 `workspace` 加进 `index.js` 的 `CHAT_WORKSPACES` 和 `shell-patch.mjs` 的同名名单。漏了后两处，清空缓存不会管到这个服务；名单不一致时门禁会红。
 
 **改版本号**：`package.json` 的 `version` 与 `client.js` 的 `BUILD` **两处必须同时改**（CI 与契约测试各拦一次）。
 
@@ -185,6 +185,7 @@ node scripts/release.mjs 0.6.14 --summary "一句话"
 8. **`detached` 不等于能活过 DSH 退出**：桌面壳把自己和它 spawn 的一切放进一个带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 job，且不允许 breakaway。`detached: true` 只解除控制台和进程组，**不解除 job**，所以补丁进程恰好在它等待「DSH 退出」的那一刻被杀——`app.asar.new` 留在原地，`app.asar` 一个字节没动。实测两次：`spawn` 一次、`Win32_Process.Create` 一次（日志尾部是 `^C`）。现在 Windows 上改由计划任务启动（`svchost` 创建，在 job 外，但仍在交互会话里，所以重开窗口能落到桌面），POSIX 上 `detached` 才够用。**判断这类问题不要用 `IsProcessInJob(pid, NULL)`**——它只回答「在不在某个 job 里」，对任何 job 都返回 true，说明不了是不是 DSH 那个。
 9. **改成计划任务后要清理**：任务在跑完自己删掉（`--task <名字>` → `forgetTask`），否则下次开机会再触发一次。`-Force` 只覆盖任务定义：包装进程一秒就退出，第二次点击时任务并不在跑，`IgnoreNew` 拦不住，`/end` 也杀不掉已经脱离的补丁进程。第二次点击靠脚本的锁文件退出，避免两个进程一起改 `app.asar`。
 10. **开关的等待不能用脚本默认的 10 分钟，而且失败不能只打在隐藏控制台上**：点开关时人还在 DSH 里。2026-11-16 实测：16:23 启动补丁进程（没传 `--wait-minutes`，默认 10），16:33 超时后删掉 `app.asar.new` 和计划任务退出；用户 16:42:54 才从托盘退出（`watchers.log` 的 `plugin.disposed`），16:43:02 新进程起来，`app.asar` 仍是升级当天的原版，时间戳一个字节没动。stdout 在隐藏控制台里，面板只显示「未开启」。现在开关显式传 `--wait-minutes 720`，脚本把全过程写到安装目录的 `dsh-chat-embed-patch.log`。面板文案里的「12 小时」必须和 `PATCH_WAIT_MINUTES` 一起改。
+11. **清缓存不能扫整个 `Partitions`**：壳自带右侧栏和本面板共用 `dsh-sidebar-` 前缀。2026-11-16 磁盘上已有一个 `dsh-sidebar-60fc2da7…`，不是本面板 7 个 workspace 算出的目录。旧 `cleanCache()` 会把它的缓存一起删掉。现在只允许 `CHAT_WORKSPACES` 的哈希目录：补丁开启时只删 `CACHE_DIR_NAMES`，关闭时才整份删除这 7 个。三处名单（`client.js`、`index.js`、`shell-patch.mjs`）必须一致。
 
 ---
 
