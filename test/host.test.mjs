@@ -68,8 +68,9 @@ function buildAsar(entries) {
   const padding = (4 - (headerBuffer.length % 4)) % 4
   const prefix = Buffer.alloc(16)
   prefix.writeUInt32LE(4, 0)
-  prefix.writeUInt32LE(headerBuffer.length + 8, 4)
-  prefix.writeUInt32LE(headerBuffer.length + 4, 8)
+  // Same framing Electron writes: the padding counts towards both sizes.
+  prefix.writeUInt32LE(headerBuffer.length + padding + 8, 4)
+  prefix.writeUInt32LE(headerBuffer.length + padding + 4, 8)
   prefix.writeUInt32LE(headerBuffer.length, 12)
   return Buffer.concat([prefix, headerBuffer, Buffer.alloc(padding), ...chunks])
 }

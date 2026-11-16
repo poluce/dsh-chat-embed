@@ -107,6 +107,7 @@ React 必须 `require('react')` 拿共享实例——自带一份副本会让 ho
 - 框架就是 `node --test`，**不引入任何依赖**。
 - 测试夹具自己造 asar（`test/host.test.mjs`、`test/shell-patch.test.mjs` 都有 `buildAsar`）。**任何测试都不许读写真实安装目录**：跑门禁不该碰到你正在用的 DSH。
 - 造 asar 时**必须写 `integrity`**（sha256 + 4 MiB 分块），否则「往返逐字节一致」断言会假失败。
+- 造 asar 时头部的两个 pickle 长度字段要**按 Electron 的写法**填 `json + pad + 8` / `json + pad + 4`（padding 也算进去）。写成 `json + 8` 时往返测试照样绿——因为夹具和被测代码用了同一个错误约定，这就是「还原只做到内容一致、差 2 字节」藏了很久的原因。
 - Client 测试通过 `test/fake-env.mjs` 安装 `window.__ModuleLoader__`，每个用例拿一个**新实例**（各自独立闭包），不要跨用例共享状态。
 - **CI 跑在 ubuntu，本地是 Windows。** 任何按平台分叉的断言必须按平台守卫，否则会在 Linux runner 上红（`shell-patch.cmd` / `.command` 不存在就是这样翻的车）。文件本身可以无条件断言存在，因为它们随包发布。
 - 需要子进程配合的用例（`--restart` 那组）必须**异步**驱动 CLI：`spawnSync` 会冻住事件循环，POSIX 上退出的子进程变成僵尸，`kill(pid, 0)` 依然成功，脚本就会一直等到超时。

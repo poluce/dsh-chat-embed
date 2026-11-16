@@ -263,10 +263,15 @@ function rebuild(buf, rewrites) {
 
   const headerJson = Buffer.from(JSON.stringify(header), 'utf8')
   const pad = (4 - (headerJson.length % 4)) % 4
+  // The two pickle size fields count the alignment padding as well. Omitting it
+  // still produced an archive Electron reads — the JSON length at offset 12 is
+  // what locates the header — but it made a revert differ from the original by
+  // two bytes, so "put it back" was only content-identical. Measured against a
+  // real shell archive: [4] = json + pad + 8, [8] = json + pad + 4.
   const prefix = Buffer.alloc(16)
   prefix.writeUInt32LE(4, 0)
-  prefix.writeUInt32LE(headerJson.length + 8, 4)
-  prefix.writeUInt32LE(headerJson.length + 4, 8)
+  prefix.writeUInt32LE(headerJson.length + pad + 8, 4)
+  prefix.writeUInt32LE(headerJson.length + pad + 4, 8)
   prefix.writeUInt32LE(headerJson.length, 12)
   return { buffer: Buffer.concat([prefix, headerJson, Buffer.alloc(pad), Buffer.concat(chunks)]), applied }
 }
