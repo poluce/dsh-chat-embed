@@ -255,7 +255,8 @@ dsh-chat-embed/
 ├── package.json               # 包名/版本、dsh.bundle.patch、dsh.client、exports/files
 ├── cordis.patch.yml           # 组合补丁：插入 id=chat-embed 的 loader 行
 ├── index.js                   # Host 半侧：补丁探针（只读）+ 开关用的执行路由
-├── client.js                  # Client 半侧（约 3985 行，手写产物）
+├── client.js                  # Client 半侧（手写产物，无构建步骤）
+├── AGENTS.md                  # 给 agent / 接手者的开发约束与踩坑记录
 ├── locale/{en,zh}.json        # 插件管理器显示用 meta
 ├── icon.svg                   # 插件图标（插件管理器显示）
 ├── assets/
@@ -264,11 +265,13 @@ dsh-chat-embed/
 ├── screenshots.json           # 商店截图清单（插件市场读取）
 ├── scripts/
 │   ├── verify-bundle.mjs      # 门禁脚本
+│   ├── release.mjs            # 一条命令发版（门禁 → 提交 → 推送 → CI → npm → tag → release）
 │   └── pack-dist.mjs          # 产出 dist/*.tgz（维护者）
 ├── test/
 │   ├── fake-env.mjs           # 伪造 DOM / 伪造桌面桥
 │   ├── client.test.mjs        # 客户端契约测试
-│   └── host.test.mjs          # Host 探针与工具测试
+│   ├── host.test.mjs          # Host 探针与路由测试
+│   └── shell-patch.test.mjs   # 补丁脚本契约测试（合成 asar，不碰真实安装）
 ├── docs/
 │   ├── architecture.md        # 架构与内嵌契约（先读这份）
 │   └── publishing.md          # 维护者：发版、分发与列表投稿
@@ -304,7 +307,7 @@ git clone <repo-url> dsh-chat-embed
 cd dsh-chat-embed
 
 # 无需安装依赖；直接跑门禁与测试
-npm run check     # 语法 + 清单 + 显示资源 + 服务注册表 + 85 项测试（CI 同样会跑）
+npm run check     # 打包检查 + 全部契约测试，两条都绿才算过（CI 同样会跑；数量以输出为准）
 npm test          # 只跑测试
 ```
 
@@ -316,6 +319,8 @@ plugin_manager { "action": "install_bundle", "target": "<本仓库克隆路径>"
 ```
 
 提交前约定：门禁必须绿；代码注释/提交信息英文，文档中文；同时改 `package.json` 的 `version` 与 `client.js` 的 `BUILD`。
+
+动手前先读 **[AGENTS.md](AGENTS.md)**：三个半侧的职责边界、`app.asar` 必须走 `original-fs`、启动器的编码限制、门禁拦什么、以及七个真实踩过的坑。
 
 ### 发布与分发
 

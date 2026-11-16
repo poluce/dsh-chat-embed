@@ -5,7 +5,7 @@
 ## 版本与提交约定
 
 - 同时改 `package.json` 的 `version` 与 `client.js` 的 `BUILD`，两者必须一致（CI 与契约测试都会拦）；
-- 门禁必须绿：`npm run check`（`verify-bundle` + 85 项契约测试）；
+- 门禁必须绿：`npm run check`（`verify-bundle` + 全部契约测试，数量以输出为准）；
 - 代码注释/提交信息英文，文档中文；
 - 提交历史正常累积，**不再重写**：发版就是一次普通提交 + 普通 push。tag 不移动——它标记的是当时发布的那次提交。
 
@@ -15,7 +15,7 @@
 
 | 步骤 | 作用 |
 | --- | --- |
-| Gate | `npm run check`（bundle 检查 + 85 项契约测试） |
+| Gate | `npm run check`（bundle 检查 + 全部契约测试） |
 | Show the packed file list | `npm pack --dry-run`，让日志里能看见发出去的到底是什么 |
 | Tag matches package.json version | 仅在 tag 触发时跑，tag 与版本不一致直接失败 |
 | client BUILD matches package.json version | 面板显示假版本号是常见事故，这里显式拦一次 |
