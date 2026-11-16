@@ -536,11 +536,44 @@ function patchTaskCommand(taskName, execute, argument) {
 }
 
 /**
+ * Wrap a command so the process the task runs gets a console of its own.
+ *
+ * A task started from the panel inherits the console DSH is running under, and
+ * that console dies with DSH. Windows then delivers CTRL_CLOSE to everything
+ * attached to it, so the patcher is killed at the exact moment it is waiting
+ * for — measured as Last Result 0xC000013A (STATUS_CONTROL_C_EXIT), with the
+ * staged archive left behind and app.asar untouched.
+ *
+ * `Start-Process` (without `-NoNewWindow`) gives the child a fresh console, and
+ * the PowerShell wrapper itself exits within a second, so nothing that matters
+ * is attached to DSH's console any more. `-EncodedCommand` keeps the nested
+ * quoting out of this: the payload is base64 of UTF-16LE, so no layer has to
+ * re-escape the arguments.
+ *
+ * @param {string} execute
+ * @param {string} argument
+ * @returns {{ execute: string, argument: string }}
+ */
+function detachedPayload(execute, argument) {
+  const quote = (value) => "'" + String(value).replace(/'/g, "''") + "'"
+  const script =
+    `Start-Process -FilePath ${quote(execute)} -ArgumentList ${quote(argument)} -WindowStyle Hidden | Out-Null`
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  return {
+    execute: 'powershell.exe',
+    argument: '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + encoded,
+  }
+}
+
+/**
  * The command the task runs, and the runtime that runs it.
  *
  * The DSH runtime ships a real Node, which is preferable to the shell binary in
  * Node mode: no `ELECTRON_RUN_AS_NODE` to smuggle through a task definition, and
  * its `fs` reads `app.asar` literally, which is all the script needs.
+ *
+ * Either way the payload is wrapped, because the console it would otherwise
+ * inherit is the one that closes when DSH quits.
  *
  * @param {string} action
  * @param {object} report
@@ -549,15 +582,12 @@ function patchTaskCommand(taskName, execute, argument) {
 function patchTaskTarget(action, report) {
   const args = [...launchArgs(action, report), '--task', PATCH_TASK]
   const node = findNodeBinary()
-  if (node !== undefined) return { execute: node, argument: args.map(winQuote).join(' ') }
+  if (node !== undefined) return detachedPayload(node, args.map(winQuote).join(' '))
   // No Node anywhere: the shell binary in Node mode, which needs the variable
   // set for it — cmd is the only place to put it in a task definition.
   const exe = selfExecutable()
   if (exe === undefined) return undefined
-  return {
-    execute: 'cmd.exe',
-    argument: '/c set "ELECTRON_RUN_AS_NODE=1" && ' + [exe, ...args].map(winQuote).join(' '),
-  }
+  return detachedPayload('cmd.exe', '/c set "ELECTRON_RUN_AS_NODE=1" && ' + [exe, ...args].map(winQuote).join(' '))
 }
 
 /**
@@ -776,6 +806,7 @@ export const internals = {
   spawnPatcher,
   patchTaskCommand,
   patchTaskTarget,
+  detachedPayload,
   startPatchTask,
   PATCH_TASK,
   PROBE_PATH,

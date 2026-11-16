@@ -508,8 +508,30 @@ test('the patch task is registered the way Task Scheduler expects', () => {
   assert.match(command, /-Force/, 'a second click replaces the first task, not queue behind it')
 })
 
-test('the patch task never fires on its own', () => {
-  // The task exists to be started now. A near-future trigger would run a second
+test('the payload gets a console of its own', () => {
+  // A task inherits the console DSH runs under, and Windows delivers CTRL_CLOSE
+  // to everything attached to it when DSH quits — the patcher died with
+  // 0xC000013A right where it was waiting. Start-Process without -NoNewWindow
+  // hands the child a fresh console, and the wrapper exits at once.
+  const wrapped = internals.detachedPayload('C:\\node.exe', 'a.mjs apply --x "C:\\a b\\c.exe"')
+  assert.equal(wrapped.execute, 'powershell.exe')
+  assert.match(wrapped.argument, /-EncodedCommand /, 'the payload travels base64, so no layer re-escapes it')
+
+  const encoded = wrapped.argument.split(' ').pop()
+  const decoded = Buffer.from(encoded, 'base64').toString('utf16le')
+  assert.match(decoded, /^Start-Process -FilePath 'C:\\node\.exe'/, 'it starts the real program')
+  assert.match(decoded, /-WindowStyle Hidden/, 'no window pops up')
+  assert.doesNotMatch(decoded, /-NoNewWindow/, 'a shared console is exactly what killed it')
+  assert.ok(decoded.includes(`'a.mjs apply --x "C:\\a b\\c.exe"'`), 'the argument line survives verbatim')
+
+  // And the task target actually goes through it: testing the wrapper alone
+  // would stay green while patchTaskTarget handed the task a bare node.
+  const target = internals.patchTaskTarget('apply', { script: 's.mjs', resources: 'C:\\r\\resources' })
+  assert.equal(target.execute, 'powershell.exe', 'the registered task runs the wrapper, not node directly')
+  assert.match(target.argument, /-EncodedCommand /)
+})
+
+test('the patch task never fires on its own', () => {  // The task exists to be started now. A near-future trigger would run a second
   // copy if the first one ended without deleting its task (a fast failure does
   // exactly that), and two patchers renaming one archive is data loss.
   const command = internals.patchTaskCommand('t', 'C:\\node.exe', 'a.mjs apply')
