@@ -54,11 +54,10 @@ scripts/pack-dist.mjs         打 tgz 给 GitHub Release
 test/fake-env.mjs             DOM + 桌面壳替身；整套测试的地基
 test/{client,host,shell-patch}.test.mjs
 tools/shell-patch/            补丁三件套：.mjs 全逻辑，.cmd / .command 只找 Node 和转参数
-清理聊天缓存.cmd              一行壳：等价于 shell-patch.cmd cache
 docs/                         架构与发版文档（中文，仅仓库，不进包）
 ```
 
-**包里发什么**由 `package.json` 的 `files` 决定：共 13 个文件，文档只有 README 一份。
+**包里发什么**由 `package.json` 的 `files` 决定：共 12 个文件，文档只有 README 一份。
 
 ---
 

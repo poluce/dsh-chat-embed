@@ -287,12 +287,11 @@ dsh-chat-embed/
 │   ├── shell-patch.mjs        # 全部逻辑：status / apply / revert / cache
 │   ├── shell-patch.cmd        # Windows 双击入口（自己找 Node）
 │   └── shell-patch.command    # macOS 双击入口
-├── 清理聊天缓存.cmd           # 快捷方式：等价于 shell-patch.cmd cache
 ├── LICENSE (MIT)
 └── README.md
 ```
 
-**npm 包里有什么**：`package.json` 的 `files` 白名单决定发布内容——`index.js`、`client.js`、`cordis.patch.yml`、`locale/*.json`、`icon.svg`、`tools/shell-patch/**`、`清理聊天缓存.cmd`、`README.md`、`LICENSE`，共 13 个文件。
+**npm 包里有什么**：`package.json` 的 `files` 白名单决定发布内容——`index.js`、`client.js`、`cordis.patch.yml`、`locale/*.json`、`icon.svg`、`tools/shell-patch/**`、`README.md`、`LICENSE`，共 12 个文件。
 
 `docs/`、`AGENTS.md`、`assets/`、`scripts/`、`test/` 都只存在于仓库，不进包；文档类只发 README 一份。门禁会拦住「又把 `docs` 加回白名单」这种事。
 

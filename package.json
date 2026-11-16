@@ -18,7 +18,6 @@
     "locale/*.json",
     "icon.svg",
     "tools/shell-patch",
-    "清理聊天缓存.cmd",
     "README.md",
     "LICENSE"
   ],
