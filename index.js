@@ -242,15 +242,26 @@ function launcherCommand(action, files, nodeBinary) {
  * Locate a Node binary for the non-desktop fallback. The desktop app ships its
  * own runtime under `dsh-runtimes`; a plain install just uses PATH.
  *
+ * @param {string} [dshHome] the DSH home, defaulting to `$DSH_HOME` or `~/.dsh`
  * @returns {string | undefined}
  */
-function findNodeBinary() {
+function nodeCandidates(dshHome) {
   const candidates = []
   if (typeof process.execPath === 'string' && /node(\.exe)?$/i.test(process.execPath)) candidates.push(process.execPath)
-  const home = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== '' ? process.env.DSH_HOME : join(homedir(), '.dsh')
+  const home =
+    dshHome !== undefined && dshHome !== ''
+      ? dshHome
+      : process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
+        ? process.env.DSH_HOME
+        : join(homedir(), '.dsh')
   const runtimes = join(home, 'dsh-runtimes')
   try {
     for (const entry of readdirSync(runtimes)) {
+      // Both suffixes: the runtime is `node.exe` on Windows and `node`
+      // elsewhere. Asking only for the bare name found nothing on Windows, so
+      // the task silently fell back to a system-wide Node — or, on a machine
+      // without one, to the shell binary through cmd.
+      candidates.push(join(runtimes, entry, 'dependencies', 'node', 'bin', 'node.exe'))
       candidates.push(join(runtimes, entry, 'dependencies', 'node', 'bin', 'node'))
     }
   } catch (error) {
@@ -261,7 +272,18 @@ function findNodeBinary() {
   } else {
     candidates.push('/usr/local/bin/node', '/usr/bin/node')
   }
-  return candidates.find((candidate) => typeof candidate === 'string' && candidate !== '' && existsSync(candidate))
+  return candidates
+}
+
+/**
+ * Locate a Node binary for the non-desktop fallback. The desktop app ships its
+ * own runtime under `dsh-runtimes`; a plain install just uses PATH.
+ *
+ * @param {string} [dshHome] the DSH home, defaulting to `$DSH_HOME` or `~/.dsh`
+ * @returns {string | undefined}
+ */
+function findNodeBinary(dshHome) {
+  return nodeCandidates(dshHome).find((candidate) => typeof candidate === 'string' && candidate !== '' && existsSync(candidate))
 }
 
 /**
@@ -744,6 +766,8 @@ export const internals = {
   readRealFile,
   resourcesCandidates,
   launcherCommand,
+  findNodeBinary,
+  nodeCandidates,
   findPatchFiles,
   installHttpRoutes,
   planPatchAction,

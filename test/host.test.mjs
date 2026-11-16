@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { afterEach } from 'node:test'
@@ -460,6 +460,34 @@ test('the probe stays optional when the composition has no webserver', () => {
     },
   }
   assert.doesNotThrow(() => apply(ctx), 'a Host without a webserver still loads')
+})
+
+test('the bundled DSH runtime is found on Windows too', () => {
+  // The runtime is `node.exe` there, and asking only for the bare `node` found
+  // nothing — so the task fell back to a system-wide Node, or to running the
+  // shell binary through cmd on a machine that has none. The runtime DSH ships
+  // must be offered before any system path.
+  const home = mkdtempSync(join(tmpdir(), 'dshce-runtime-'))
+  scratch.push(home)
+  const bin = join(home, 'dsh-runtimes', 'dsh-primary-runtime', 'dependencies', 'node', 'bin')
+  mkdirSync(bin, { recursive: true })
+  const name = process.platform === 'win32' ? 'node.exe' : 'node'
+  writeFileSync(join(bin, name), '')
+
+  const list = internals.nodeCandidates(home)
+  const shipped = list.indexOf(join(bin, name))
+  assert.ok(shipped !== -1, 'the shipped runtime is a candidate at all: ' + JSON.stringify(list))
+  // The system fallback is appended last; execPath may well be the same file
+  // (the test runner is a Node), so compare against the tail, not the first hit.
+  const fallback =
+    process.platform === 'win32'
+      ? join(process.env.ProgramFiles ?? 'C:\\Program Files', 'nodejs', 'node.exe')
+      : '/usr/local/bin/node'
+  const systemAt = list.lastIndexOf(fallback)
+  assert.ok(
+    systemAt === -1 || shipped < systemAt,
+    'the shipped runtime is offered before the system fallback: ' + JSON.stringify(list),
+  )
 })
 
 test('the probe survives a malformed host context', () => {
