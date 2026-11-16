@@ -375,6 +375,80 @@ test('a relaunch that cannot start says so and keeps the swap', async () => {
   assert.notEqual(hashOf(readFileSync(join(dir, 'app.asar'))), hashOf(original))
 })
 
+test('revert honours --restart instead of dropping the option on the floor', async () => {
+  // The switch sends "revert --restart --pid <shell>". That call used to reach
+  // revert() without its options, so the wait was skipped entirely and the swap
+  // went straight into its own retry loop — which had no deadline. The result
+  // was a patcher that could sit for hours holding app.asar open, while the
+  // pending shell update failed to install because the directory was in use.
+  const dir = install(buildAsar(ENTRIES))
+  assert.equal(run(['apply', '--resources', dir, '--yes']).code, 0)
+  const patched = archiveHash(dir)
+  const app = fakeApp(30000)
+  try {
+    const { code, out } = await runAsync([
+      'revert',
+      '--resources',
+      dir,
+      '--yes',
+      '--restart',
+      '--pid',
+      String(app.pid),
+      '--wait-minutes',
+      '0.01',
+    ])
+    assert.notEqual(code, 0, 'it waited, ran out, and said so')
+    assert.match(out, /还没退出/, 'the wait actually happened')
+    assert.doesNotMatch(out, /补丁版已留作/, 'it never reached the swap')
+    assert.equal(archiveHash(dir), patched, 'the archive is untouched')
+    assert.equal(existsSync(join(dir, 'app.asar.new')), false, 'the staged copy was dropped')
+  } finally {
+    app.kill()
+  }
+})
+
+/**
+ * Hold `file` memory-mapped for `ms`, the way the shell holds app.asar.
+ *
+ * A plain open handle is not enough: Windows lets a rename proceed next to a
+ * reader. A memory-mapped section is what makes `renameSync` raise EBUSY, and
+ * that is the only portable way to reproduce the state the script waits out.
+ *
+ * @param {string} file
+ * @param {number} ms
+ * @returns {import('node:child_process').ChildProcess}
+ */
+function holdMapped(file, ms) {
+  const script =
+    `$f=[System.IO.File]::Open('${file}','Open','Read','ReadWrite');` +
+    `$m=[System.IO.MemoryMappedFiles.MemoryMappedFile]::CreateFromFile($f,'dce-test-${Date.now()}',1024,'ReadWrite');` +
+    `Start-Sleep -Milliseconds ${String(ms)}`
+  return spawn('powershell.exe', ['-NoProfile', '-Command', script], { stdio: 'ignore' })
+}
+
+test('the swap gives up on a mapped archive instead of waiting forever', { skip: process.platform !== 'win32' }, async () => {
+  const dir = install(buildAsar(ENTRIES))
+  const before = archiveHash(dir)
+  const holder = holdMapped(join(dir, 'app.asar'), 30000)
+  try {
+    // Give PowerShell time to open the mapping before the script races it.
+    await new Promise((done) => setTimeout(done, 2500))
+    const started = Date.now()
+    const { code, out } = await runAsync(['apply', '--resources', dir, '--yes', '--wait-minutes', '0.02'])
+    const elapsed = Date.now() - started
+
+    assert.notEqual(code, 0, 'a busy archive is a failure, not a silent success')
+    assert.ok(elapsed < 20000, 'it respected the budget instead of hanging: ' + String(elapsed) + 'ms')
+    assert.match(out, /等了/, 'it says how long it waited')
+    assert.match(out, /没有改动任何文件/, 'and that nothing was written')
+    assert.match(out, /完全退出/, 'and repeats how to actually release the file')
+    assert.equal(archiveHash(dir), before, 'the archive is untouched')
+    assert.equal(existsSync(join(dir, 'app.asar.new')), false, 'the staged copy was dropped')
+  } finally {
+    holder.kill()
+  }
+})
+
 test('the launchers exist and are the ones the Host reports', () => {
   // The Host half points the user at these two paths; a rename here without a
   // matching change there is a dead link in the dialog.

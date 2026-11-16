@@ -385,16 +385,22 @@ function isBusy(error) {
  * Replace `archive` with `staged`, keeping the old archive at `keepAs` (or
  * deleting it when `keepAs` is undefined).
  *
- * A running DSH holds the archive memory-mapped. On Windows that blocks the
- * rename, so the script waits for the app to exit and says so; on macOS and
- * Linux the rename succeeds and the change takes effect at the next launch.
+ * A running DSH keeps app.asar memory-mapped, and on Windows a mapped file
+ * cannot be renamed. That wait has to be bounded: an unbounded one is
+ * indistinguishable from a hang, and a patcher that never exits is worse than
+ * one that fails — it holds the archive open, which is exactly the state that
+ * keeps a pending shell update from installing.
  *
  * @param {string} archive
  * @param {string} staged
  * @param {string | undefined} keepAs
+ * @param {{ waitMinutes?: number }} [options] the same budget `--restart` obeys
+ * @returns {Promise<boolean>} false when the app never let go in time
  */
-async function swapIn(archive, staged, keepAs) {
+async function swapIn(archive, staged, keepAs, options = {}) {
   const parked = archive + '.prev'
+  const minutes = Number.isFinite(options.waitMinutes) && options.waitMinutes > 0 ? options.waitMinutes : 0
+  const deadline = minutes > 0 ? Date.now() + minutes * 60000 : 0
   let waitedSince = 0
   for (;;) {
     try {
@@ -403,6 +409,15 @@ async function swapIn(archive, staged, keepAs) {
     } catch (error) {
       if (!isBusy(error)) throw error
       const now = Date.now()
+      if (deadline !== 0 && now > deadline) {
+        say('')
+        say('  ✗ app.asar 被 DSH 占着，等了 ' + minutes + ' 分钟仍没释放。')
+        say('    没有改动任何文件，暂存副本也一并删掉。')
+        say('')
+        say('    要换文件，DSH 必须完全退出：右键托盘图标 →「退出」。')
+        say('    只是关窗口不够——那会把窗口收进托盘，进程还在。')
+        return false
+      }
       if (waitedSince === 0) {
         waitedSince = now
         say('')
@@ -411,7 +426,8 @@ async function swapIn(archive, staged, keepAs) {
         say('')
       } else if (now - waitedSince > 8000) {
         waitedSince = now
-        say('  仍在等待 DSH 退出 …')
+        const budget = minutes > 0 ? '（最多再等 ' + Math.max(1, Math.ceil((deadline - now) / 60000)) + ' 分钟）' : ''
+        say('  仍在等待 DSH 退出 …' + budget)
       }
       await delay(700)
       continue
@@ -443,7 +459,7 @@ async function swapIn(archive, staged, keepAs) {
         say('  · 旧版本没能另存为 ' + keepAs + '：' + reasonOf(error))
       }
     }
-    return
+    return true
   }
 }
 
@@ -637,7 +653,10 @@ async function apply(resources, options) {
   // Park a pristine copy the first time. A backup that is itself patched is
   // worthless as a restore point, so it never gets to overwrite a clean one.
   const keep = backupState(resources) === 'clean' ? undefined : join(resources, BACKUP)
-  await swapIn(state.archive, staged, keep)
+  if (!(await swapIn(state.archive, staged, keep, options))) {
+    discardStaged(staged)
+    return 1
+  }
   if (keep !== undefined) say('  ✓ 原版已留作 ' + BACKUP)
   changed = true
   if (options.restart === true) await relaunchApp(options)
@@ -691,7 +710,10 @@ async function revert(resources, options = {}) {
     discardStaged(staged)
     return 1
   }
-  await swapIn(state.archive, staged, join(resources, PATCHED_COPY))
+  if (!(await swapIn(state.archive, staged, join(resources, PATCHED_COPY), options))) {
+    discardStaged(staged)
+    return 1
+  }
   say('  ✓ 补丁版已留作 ' + PATCHED_COPY)
   changed = true
   if (options.restart === true) await relaunchApp(options)
@@ -1007,7 +1029,7 @@ async function main() {
   let code
   if (options.action === 'status') code = status(resources)
   else if (options.action === 'apply') code = await apply(resources, options)
-  else if (options.action === 'revert') code = await revert(resources)
+  else if (options.action === 'revert') code = await revert(resources, options)
   else if (options.action === 'cache') code = cleanCache()
   else code = await menu(resources, options)
 
