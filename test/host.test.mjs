@@ -480,6 +480,16 @@ test('the patch task is registered the way Task Scheduler expects', () => {
   assert.match(command, /-Force/, 'a second click replaces the first task, not queue behind it')
 })
 
+test('the patch task never fires on its own', () => {
+  // The task exists to be started now. A near-future trigger would run a second
+  // copy if the first one ended without deleting its task (a fast failure does
+  // exactly that), and two patchers renaming one archive is data loss.
+  const command = internals.patchTaskCommand('t', 'C:\\node.exe', 'a.mjs apply')
+  assert.doesNotMatch(command, /AddMinutes/, 'the trigger is not a minute away')
+  assert.match(command, /-Once -At \(Get-Date\)\.AddDays\(30\)/, 'it sits far enough out to never fire')
+  assert.match(command, /-MultipleInstances IgnoreNew/, 'and a second copy is refused anyway')
+})
+
 test('a value with a quote cannot break out of the task command', () => {
   // Paths land inside single-quoted PowerShell strings, where the only escape is
   // doubling. An apostrophe in a path is unusual, not impossible, and silently

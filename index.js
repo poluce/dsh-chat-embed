@@ -499,8 +499,15 @@ function patchTaskCommand(taskName, execute, argument) {
   return [
     "$ErrorActionPreference = 'Stop'",
     `$action = New-ScheduledTaskAction -Execute ${quote(execute)} -Argument ${quote(argument)}`,
-    '$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)',
-    '$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 20)',
+    // The trigger is a formality: Task Scheduler will not register a task
+    // without one, but this task is started explicitly and must never fire on
+    // its own. A near-future trigger would — a patcher that failed fast and did
+    // not get to delete its task would be re-run a minute later, and two
+    // patchers racing over one archive is how an install gets corrupted.
+    '$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddDays(30)',
+    // Belt and braces for the same reason: never run a second copy while one is
+    // still waiting for DSH to close.
+    '$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20)',
     `Register-ScheduledTask -TaskName ${quote(taskName)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
     `Start-ScheduledTask -TaskName ${quote(taskName)}`,
   ].join('; ')
