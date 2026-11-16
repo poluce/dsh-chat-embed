@@ -293,7 +293,7 @@ test('the probe answers GET and HEAD and nothing else, and writes nothing', () =
 
 test('the probe hands out the token the action route demands', async () => {
   const { mounted, ctx } = routeContext()
-  internals.installHttpRoutes(ctx, { inspect: () => patchable(), spawn: () => fakeChild() })
+  internals.installHttpRoutes(ctx, { inspect: () => patchable(), platform: 'linux', spawn: () => fakeChild() })
   const probe = routeAt(mounted, internals.PROBE_PATH)
   const body = await probe.resource(new Request('http://127.0.0.1' + internals.PROBE_PATH), undefined).json()
   assert.equal(body.token, internals.PATCH_TOKEN, 'the panel learns the token from the probe')
@@ -307,7 +307,7 @@ test('the probe hands out the token the action route demands', async () => {
 test('the action route refuses a bad action and a non-GET method', () => {
   const { mounted, ctx } = routeContext()
   const spawned = []
-  internals.installHttpRoutes(ctx, { inspect: () => patchable(), spawn: (...args) => (spawned.push(args), fakeChild()) })
+  internals.installHttpRoutes(ctx, { inspect: () => patchable(), platform: 'linux', spawn: (...args) => (spawned.push(args), fakeChild()) })
   const action = routeAt(mounted, internals.PATCH_PATH)
 
   const post = action.resource(
@@ -355,6 +355,7 @@ test('a started action runs the script with the shell as the process to wait for
   const { mounted, ctx } = routeContext()
   const calls = []
   internals.installHttpRoutes(ctx, {
+    platform: 'linux',
     inspect: () => patchable(),
     spawn: (...args) => {
       calls.push(args)
@@ -386,6 +387,7 @@ test('a second click replaces the waiting patcher instead of piling them up', ()
   const { mounted, ctx } = routeContext()
   const children = []
   internals.installHttpRoutes(ctx, {
+    platform: 'linux',
     inspect: () => patchable(),
     spawn: () => {
       const child = fakeChild()
@@ -405,6 +407,7 @@ test('a second click replaces the waiting patcher instead of piling them up', ()
 test('a spawn that throws is reported, not swallowed', async () => {
   const { mounted, ctx } = routeContext()
   internals.installHttpRoutes(ctx, {
+    platform: 'linux',
     inspect: () => patchable(),
     spawn: () => {
       throw new Error('spawn nope')
@@ -420,7 +423,7 @@ test('a spawn that throws is reported, not swallowed', async () => {
 test('unloading the bundle stops a patcher it started', () => {
   const { mounted, ctx } = routeContext()
   const child = fakeChild()
-  const dispose = internals.installHttpRoutes(ctx, { inspect: () => patchable(), spawn: () => child })
+  const dispose = internals.installHttpRoutes(ctx, { inspect: () => patchable(), platform: 'linux', spawn: () => child })
   routeAt(mounted, internals.PATCH_PATH).resource(actionRequest('action=apply&token=' + internals.PATCH_TOKEN), undefined)
   assert.equal(child.killed, false)
   dispose()
@@ -461,4 +464,91 @@ test('the probe stays optional when the composition has no webserver', () => {
 test('the probe survives a malformed host context', () => {
   assert.doesNotThrow(() => apply(undefined))
   assert.doesNotThrow(() => apply({}))
+})
+
+test('the patch task is registered the way Task Scheduler expects', () => {
+  // DSH keeps every process it spawns in a job object that dies with it, so a
+  // plain child patcher is killed exactly while it waits for the quit. The task
+  // is the only thing that outlives that, and it must be a real registration:
+  // Execute and Argument are action fields, not a command line.
+  const command = internals.patchTaskCommand('dsh-chat-embed-patch', 'C:\\node.exe', 'a.mjs apply --x 1')
+  assert.match(command, /New-ScheduledTaskAction -Execute 'C:\\node\.exe'/)
+  assert.match(command, /-Argument 'a\.mjs apply --x 1'/)
+  assert.match(command, /Register-ScheduledTask -TaskName 'dsh-chat-embed-patch'/)
+  assert.match(command, /Start-ScheduledTask -TaskName 'dsh-chat-embed-patch'/)
+  assert.match(command, /-Force/, 'a second click replaces the first task, not queue behind it')
+})
+
+test('a value with a quote cannot break out of the task command', () => {
+  // Paths land inside single-quoted PowerShell strings, where the only escape is
+  // doubling. An apostrophe in a path is unusual, not impossible, and silently
+  // producing a syntax error would look exactly like "the button does nothing".
+  const command = internals.patchTaskCommand('t', "C:\\it's\\node.exe", "it's a path")
+  assert.match(command, /-Execute 'C:\\it''s\\node\.exe'/)
+  assert.match(command, /-Argument 'it''s a path'/)
+  assert.doesNotMatch(command, /-Execute 'C:\\it's/)
+})
+
+test('a registered task is how the patcher gets started on Windows', () => {
+  const calls = []
+  const run = (program, args) => {
+    calls.push({ program, args })
+    return { status: 0 }
+  }
+  const task = internals.startPatchTask(
+    'apply',
+    { script: 'C:\\r\\shell-patch.mjs', resources: 'C:\\r\\resources' },
+    run,
+  )
+  assert.ok(task !== undefined, 'the task path is taken when registration succeeds')
+  assert.equal(calls.length, 1, 'one PowerShell call does register plus start')
+  assert.equal(calls[0].program, 'powershell.exe')
+  assert.match(calls[0].args.join(' '), /Register-ScheduledTask/)
+
+  task.kill()
+  assert.deepEqual(
+    calls.slice(1).map((call) => call.args[0]),
+    ['/end', '/delete'],
+    'a replaced patcher is stopped and then removed, not left to fire again',
+  )
+})
+
+test('a task that will not register falls back instead of failing the click', () => {
+  const run = () => ({ status: 1, stderr: 'Access is denied.' })
+  assert.equal(
+    internals.startPatchTask('apply', { script: 's.mjs', resources: 'C:\\r\\resources' }, run),
+    undefined,
+    'the caller can still try the plain spawn path',
+  )
+})
+
+test('on Windows the click goes to Task Scheduler, not to a doomed child process', async () => {
+  // The regression this pins: `detached: true` reads like "outlives the parent",
+  // and on this platform it is not. DSH puts everything it spawns into a job
+  // with KILL_ON_JOB_CLOSE, so the child died with the shell and the archive was
+  // never swapped. If this test goes green while startPatchTask is skipped, the
+  // switch is silently broken again.
+  const { mounted, ctx } = routeContext()
+  const spawned = []
+  const runs = []
+  internals.installHttpRoutes(ctx, {
+    platform: 'win32',
+    inspect: () => patchable(),
+    run: (program, args) => {
+      runs.push({ program, args })
+      return { status: 0 }
+    },
+    spawn: (...args) => {
+      spawned.push(args)
+      return fakeChild()
+    },
+  })
+  const action = routeAt(mounted, internals.PATCH_PATH)
+  const body = await action.resource(actionRequest('action=apply&token=' + internals.PATCH_TOKEN), undefined).json()
+
+  assert.equal(body.ok, true)
+  assert.equal(body.state, 'started')
+  assert.equal(spawned.length, 0, 'no plain child: that one does not survive the quit')
+  assert.equal(runs.length, 1)
+  assert.equal(runs[0].program, 'powershell.exe')
 })

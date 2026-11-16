@@ -19,7 +19,7 @@
  * so uninstalling the bundle leaves the Host process exactly as it was.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -59,6 +59,14 @@ const TOKEN_PARAM = 'token'
 
 /** The one token this Host process accepts. */
 const PATCH_TOKEN = randomUUID().replace(/-/g, '')
+
+/**
+ * The Task Scheduler entry that carries the swap across DSH's exit.
+ *
+ * Named so that a second click can replace the first one instead of queueing a
+ * second patcher behind it.
+ */
+const PATCH_TASK = 'dsh-chat-embed-patch'
 
 /** Strings that identify the patch in a rebuilt archive. */
 const PATCH_MARK = 'persist:dsh-sidebar-'
@@ -457,17 +465,124 @@ function launchArgs(action, report) {
 }
 
 /**
+ * Quote one argument for a Windows command line.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function winQuote(value) {
+  return /[\s"]/.test(value) ? '"' + value.replace(/"/g, '\\"') + '"' : value
+}
+
+/**
+ * Build the PowerShell that registers and starts the patch task.
+ *
+ * A plain child process cannot do this job on Windows. The desktop shell puts
+ * itself and everything it spawns into a job object carrying
+ * `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and without breakaway, so `detached`
+ * buys nothing: the patcher is destroyed at the very moment it is waiting for,
+ * leaving `app.asar.new` staged and `app.asar` untouched. Measured twice — once
+ * through `spawn`, once through WMI, which came back with a console-close
+ * interrupt in its log.
+ *
+ * A task started by Task Scheduler is created by `svchost` instead: outside the
+ * job, but still in the interactive session, so the window the script reopens
+ * lands on the user's desktop rather than nowhere.
+ *
+ * @param {string} taskName
+ * @param {string} execute the program the task runs
+ * @param {string} argument its command line
+ * @returns {string} one PowerShell script
+ */
+function patchTaskCommand(taskName, execute, argument) {
+  const quote = (value) => "'" + String(value).replace(/'/g, "''") + "'"
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$action = New-ScheduledTaskAction -Execute ${quote(execute)} -Argument ${quote(argument)}`,
+    '$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)',
+    '$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 20)',
+    `Register-ScheduledTask -TaskName ${quote(taskName)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
+    `Start-ScheduledTask -TaskName ${quote(taskName)}`,
+  ].join('; ')
+}
+
+/**
+ * The command the task runs, and the runtime that runs it.
+ *
+ * The DSH runtime ships a real Node, which is preferable to the shell binary in
+ * Node mode: no `ELECTRON_RUN_AS_NODE` to smuggle through a task definition, and
+ * its `fs` reads `app.asar` literally, which is all the script needs.
+ *
+ * @param {string} action
+ * @param {object} report
+ * @returns {{ execute: string, argument: string } | undefined}
+ */
+function patchTaskTarget(action, report) {
+  const args = [...launchArgs(action, report), '--task', PATCH_TASK]
+  const node = findNodeBinary()
+  if (node !== undefined) return { execute: node, argument: args.map(winQuote).join(' ') }
+  // No Node anywhere: the shell binary in Node mode, which needs the variable
+  // set for it — cmd is the only place to put it in a task definition.
+  const exe = selfExecutable()
+  if (exe === undefined) return undefined
+  return {
+    execute: 'cmd.exe',
+    argument: '/c set "ELECTRON_RUN_AS_NODE=1" && ' + [exe, ...args].map(winQuote).join(' '),
+  }
+}
+
+/**
+ * Hand the patch to Task Scheduler.
+ *
+ * @param {string} action
+ * @param {object} report
+ * @param {typeof spawnSync} run
+ * @returns {{ kill: () => void } | undefined} undefined when the task would not register
+ */
+function startPatchTask(action, report, run) {
+  const target = patchTaskTarget(action, report)
+  if (target === undefined) return undefined
+  const command = patchTaskCommand(PATCH_TASK, target.execute, target.argument)
+  const result = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+    stdio: 'ignore',
+    windowsHide: true,
+    timeout: 30000,
+  })
+  if (result.status !== 0) return undefined
+  return {
+    kill() {
+      run('schtasks.exe', ['/end', '/tn', PATCH_TASK], { stdio: 'ignore', windowsHide: true, timeout: 15000 })
+      run('schtasks.exe', ['/delete', '/tn', PATCH_TASK, '/f'], {
+        stdio: 'ignore',
+        windowsHide: true,
+        timeout: 15000,
+      })
+    },
+  }
+}
+
+/**
  * Start the patch script so that it outlives this process.
  *
  * It has to: the swap waits for DSH to exit, and that exit takes this Host with
- * it. `detached` plus `unref` is what keeps the child alive across that.
+ * it. On Windows that means Task Scheduler (see {@link patchTaskCommand}); on
+ * the other platforms a `detached` child is enough, because nothing there kills
+ * a process for the crime of sharing a parent.
  *
  * @param {string} action 'apply' or 'revert'
  * @param {object} report the probe's answer
  * @param {typeof spawn} spawnProcess
- * @returns {import('node:child_process').ChildProcess | undefined}
+ * @param {typeof spawnSync} [run] the seam the task path uses
+ * @param {string} [platform] the seam the tests use to reach both paths
+ * @returns {import('node:child_process').ChildProcess | { kill: () => void } | undefined}
  */
-function spawnPatcher(action, report, spawnProcess) {
+function spawnPatcher(action, report, spawnProcess, run = spawnSync, platform = process.platform) {
+  if (platform === 'win32') {
+    const task = startPatchTask(action, report, run)
+    if (task !== undefined) return task
+    // Fall through: a shell without Task Scheduler still deserves the attempt,
+    // even though the patcher will not survive the quit on this platform.
+  }
   const child = spawnProcess(selfExecutable() ?? process.execPath, launchArgs(action, report), {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     detached: true,
@@ -488,7 +603,7 @@ function spawnPatcher(action, report, spawnProcess) {
  * exit and then does the swap and the relaunch; this half never writes a byte.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{ inspect?: () => object, spawn?: typeof spawn }} [deps] test seams
+ * @param {{ inspect?: () => object, spawn?: typeof spawn, run?: typeof spawnSync }} [deps] test seams
  * @returns {(() => void) | undefined} a disposer, or undefined without a webserver
  */
 function installHttpRoutes(ctx, deps = {}) {
@@ -496,6 +611,8 @@ function installHttpRoutes(ctx, deps = {}) {
   if (server === undefined || server === null || typeof server.register !== 'function') return undefined
   const read = typeof deps.inspect === 'function' ? deps.inspect : inspectShell
   const spawnProcess = typeof deps.spawn === 'function' ? deps.spawn : spawn
+  const run = typeof deps.run === 'function' ? deps.run : spawnSync
+  const platform = typeof deps.platform === 'string' ? deps.platform : process.platform
   /** The patcher this panel started, so a second click replaces it. */
   let waiting
 
@@ -562,7 +679,7 @@ function installHttpRoutes(ctx, deps = {}) {
       }
       stopWaiting()
       try {
-        waiting = spawnPatcher(which, report, spawnProcess)
+        waiting = spawnPatcher(which, report, spawnProcess, run, platform)
       } catch (error) {
         return jsonResponse({ ok: false, state: 'failed', detail: firstLine(error), command: plan.command })
       }
@@ -625,6 +742,11 @@ export const internals = {
   planPatchAction,
   launchArgs,
   selfExecutable,
+  spawnPatcher,
+  patchTaskCommand,
+  patchTaskTarget,
+  startPatchTask,
+  PATCH_TASK,
   PROBE_PATH,
   PATCH_PATH,
   PATCH_TOKEN,

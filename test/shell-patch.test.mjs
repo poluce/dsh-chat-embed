@@ -449,6 +449,17 @@ test('the swap gives up on a mapped archive instead of waiting forever', { skip:
   }
 })
 
+test('--task is a known option, so the Host can hand its task name through', () => {
+  // The Host starts this script from a Task Scheduler entry on Windows, and the
+  // entry must not outlive the run. The name therefore arrives as an argument;
+  // an unknown option would flip on `--help` and turn the click into a no-op.
+  const dir = install(buildAsar(ENTRIES))
+  const { code, out } = run(['status', '--resources', dir, '--task', 'dce-test-task-absent'])
+  assert.equal(code, 0, out)
+  assert.doesNotMatch(out, /unknown argument/, 'the flag is parsed, not rejected')
+  assert.match(out, /可写/, 'the command still ran')
+})
+
 test('the launchers exist and are the ones the Host reports', () => {
   // The Host half points the user at these two paths; a rename here without a
   // matching change there is a dead link in the dialog.

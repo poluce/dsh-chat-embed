@@ -91,6 +91,8 @@ const isTty = process.stdout.isTTY === true
 let changed = false
 /** Set when the same run also started DSH again, so the last line can say so. */
 let reopened = false
+/** The Task Scheduler entry that started this run, removed on the way out. */
+let pendingTask
 
 // ---------------------------------------------------------------------------
 // Output
@@ -466,6 +468,35 @@ async function swapIn(archive, staged, keepAs, options = {}) {
 // ---------------------------------------------------------------------------
 // Handing off: wait for DSH to exit, swap, start it again
 // ---------------------------------------------------------------------------
+
+/**
+ * Remove the scheduled task that started this run.
+ *
+ * On Windows the Host cannot start this script as a plain child: DSH keeps every
+ * process it spawns in a job object that dies with it, so the patcher would be
+ * killed exactly while it waits. The Host therefore registers a Task Scheduler
+ * entry, which `svchost` starts outside that job. Such a task has one purpose
+ * and no reason to survive it — and leaving it behind would fire it again after
+ * the next reboot.
+ *
+ * @param {string | undefined} name
+ */
+function forgetTask(name) {
+  if (process.platform !== 'win32') return
+  if (typeof name !== 'string' || name === '') return
+  // A scheduled task gets the machine environment, not this shell's; resolving
+  // the path here keeps the deletion independent of whatever PATH it inherits.
+  const systemRoot = process.env.SystemRoot !== undefined ? process.env.SystemRoot : 'C:\\Windows'
+  try {
+    spawnSync(join(systemRoot, 'System32', 'schtasks.exe'), ['/delete', '/tn', name, '/f'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+  } catch (error) {
+    // A task that will not delete is litter, not a failed patch.
+    void error
+  }
+}
 
 /** Drop the archive a `--restart` run staged but never swapped in. @param {string} staged */
 function discardStaged(staged) {
@@ -877,6 +908,7 @@ function parseArgs(argv) {
     pid: undefined,
     exe: undefined,
     waitMinutes: 10,
+    task: undefined,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -892,12 +924,14 @@ function parseArgs(argv) {
     else if (arg === '--pid') options.pid = Number(argv[++index])
     else if (arg === '--exe') options.exe = argv[++index]
     else if (arg === '--wait-minutes') options.waitMinutes = Number(argv[++index])
+    else if (arg === '--task') options.task = argv[++index]
     else if (arg === '--help' || arg === '-h') options.help = true
     else {
       console.error('unknown argument: ' + arg)
       options.help = true
     }
   }
+  pendingTask = options.task
   return options
 }
 
@@ -1040,6 +1074,7 @@ async function main() {
     say('  ──────────────────────────────────────')
   }
   say('')
+  forgetTask(options.task)
   return code
 }
 
@@ -1051,6 +1086,7 @@ main().then(
     say('')
     say('  ✗ ' + reasonOf(error))
     say('')
+    forgetTask(pendingTask)
     process.exitCode = 1
   },
 )

@@ -182,6 +182,8 @@ node scripts/release.mjs 0.6.14 --summary "一句话"
 5. **Electron fs**：见 §4.1。
 6. **Linux CI**：见 §5。
 7. **提示条被标签栏盖住**：见 §7。
+8. **`detached` 不等于能活过 DSH 退出**：桌面壳把自己和它 spawn 的一切放进一个带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 job，且不允许 breakaway。`detached: true` 只解除控制台和进程组，**不解除 job**，所以补丁进程恰好在它等待「DSH 退出」的那一刻被杀——`app.asar.new` 留在原地，`app.asar` 一个字节没动。实测两次：`spawn` 一次、`Win32_Process.Create` 一次（日志尾部是 `^C`）。现在 Windows 上改由计划任务启动（`svchost` 创建，在 job 外，但仍在交互会话里，所以重开窗口能落到桌面），POSIX 上 `detached` 才够用。**判断这类问题不要用 `IsProcessInJob(pid, NULL)`**——它只回答「在不在某个 job 里」，对任何 job 都返回 true，说明不了是不是 DSH 那个。
+9. **改成计划任务后要清理**：任务在跑完自己删掉（`--task <名字>` → `forgetTask`），否则下次开机会再触发一次；重名的第二次点击靠 `Register-ScheduledTask -Force` 覆盖。
 
 ---
 
@@ -228,7 +230,7 @@ $env:ELECTRON_RUN_AS_NODE = '1'
 Remove-Item Env:\ELECTRON_RUN_AS_NODE
 ```
 
-> 开关走的就是这条：Host 用 `process.execPath` + `ELECTRON_RUN_AS_NODE` 起脚本，所以「在真实环境里能跑」不是可选项。
+> 开关在 Windows 上走的是计划任务（见 §10 第 8 条），任务里跑的就是这条命令的等价形式：DSH 自带的 Node + 这个脚本。所以「在真实环境里能跑」不是可选项。
 
 ---
 
