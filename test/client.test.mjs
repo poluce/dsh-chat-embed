@@ -1655,6 +1655,8 @@ test('a pending patch asks the user to quit DSH from the tray', async () => {
   assert.match(pendingCss[0], /z-index:5/, 'and it paints above the tab bar')
   assert.match(instance.internals.DICTS.zh.patchPendingHint, /托盘/, 'zh says where to quit')
   assert.match(instance.internals.DICTS.en.patchPendingHint, /tray/, 'en says where to quit')
+  assert.match(instance.internals.DICTS.zh.patchPendingHint, /12 小时/, 'zh names the wait, so a late quit is not a surprise')
+  assert.match(instance.internals.DICTS.en.patchPendingHint, /12 hours/, 'en names the wait, so a late quit is not a surprise')
 })
 
 test('one row opens a dialog that hands over the script', async () => {

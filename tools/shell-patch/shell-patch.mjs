@@ -82,6 +82,8 @@ const MAIN_ENTRY = 'lib/main.js'
 const BACKUP = 'app.asar.orig'
 const PATCHED_COPY = 'app.asar.patched.bak'
 const STAGED = 'app.asar.new'
+const LOCK_NAME = '.dsh-chat-embed-patch.lock'
+const PATCH_LOG_NAME = 'dsh-chat-embed-patch.log'
 const BLOCK_SIZE = 4194304
 
 const SELF = fileURLToPath(import.meta.url)
@@ -93,14 +95,51 @@ let changed = false
 let reopened = false
 /** The Task Scheduler entry that started this run, removed on the way out. */
 let pendingTask
+/** Set once this run owns the lock, so a failure still releases only its own. */
+let ownedLock
+/** Where `say` also writes, once a writing command has opened it. */
+let patchLog
 
 // ---------------------------------------------------------------------------
 // Output
 // ---------------------------------------------------------------------------
 
+/**
+ * Start a fresh log beside the archive.
+ *
+ * The switch runs this script with a hidden console, so a timeout that only
+ * reaches stdout is invisible: the user quits later, finds an untouched
+ * archive, and has no sentence that says why. One file per install also keeps
+ * a parallel test from wiping another run's log.
+ *
+ * @param {string} resources
+ */
+function openLog(resources) {
+  const path = join(resources, PATCH_LOG_NAME)
+  try {
+    writeFileSync(path, '')
+    patchLog = path
+  } catch (error) {
+    void error
+  }
+}
+
 /** @param {string} [line] */
 function say(line) {
-  console.log(line === undefined ? '' : line)
+  const text = line === undefined ? '' : line
+  console.log(text)
+  if (patchLog === undefined) return
+  try {
+    nodeFs.appendFileSync(patchLog, text + '\n')
+  } catch (error) {
+    void error
+  }
+}
+
+/** Mention the log in a failure, so the hidden-console case still points at it. */
+function sayLog() {
+  if (patchLog === undefined) return
+  say('    过程写在 ' + patchLog)
 }
 
 /** @param {number} bytes */
@@ -420,6 +459,7 @@ async function swapIn(archive, staged, keepAs, options = {}) {
         say('')
         say('  ✗ app.asar 被 DSH 占着，等了 ' + minutes + ' 分钟仍没释放。')
         say('    没有改动任何文件，暂存副本也一并删掉。')
+        sayLog()
         say('')
         say('    要换文件，DSH 必须完全退出：右键托盘图标 →「退出」。')
         say('    只是关窗口不够——那会把窗口收进托盘，进程还在。')
@@ -534,6 +574,61 @@ function isRunning(pid) {
 }
 
 /**
+ * Claim the right to rewrite this install, or refuse because another patcher
+ * already has it.
+ *
+ * The switch starts the script detached, and the task that started it exits
+ * at once. A second click therefore cannot stop the first process: both would
+ * wait for the same quit and then rename one archive. The lock is the refusal.
+ * A stale lock (its pid is gone) is taken over; a lock that cannot be created
+ * must not block the only writer.
+ *
+ * @param {string} resources
+ * @returns {boolean} false when a live patcher already holds it
+ */
+function claimPatcher(resources) {
+  const lockPath = join(resources, LOCK_NAME)
+  const own = String(process.pid)
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeFileSync(lockPath, own, { flag: 'wx' })
+      ownedLock = lockPath
+      return true
+    } catch (error) {
+      const code =
+        error !== null && error !== undefined && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+      if (code !== 'EEXIST') return true
+      let holder = 0
+      try {
+        holder = Number(readFileSync(lockPath, 'utf8').trim())
+      } catch (readError) {
+        void readError
+      }
+      if (holder !== process.pid && isRunning(holder)) return false
+      try {
+        unlinkSync(lockPath)
+      } catch (unlinkError) {
+        void unlinkError
+      }
+    }
+  }
+  return false
+}
+
+/** Release the lock only if this process still owns it. */
+function releasePatcher() {
+  if (ownedLock === undefined) return
+  const lockPath = ownedLock
+  ownedLock = undefined
+  try {
+    const holder = Number(readFileSync(lockPath, 'utf8').trim())
+    if (holder === process.pid) unlinkSync(lockPath)
+  } catch (error) {
+    void error
+  }
+}
+
+/**
  * Ask the user to quit DSH, and wait for it.
  *
  * The caller has staged the new archive but has not touched the old one yet: a
@@ -564,12 +659,14 @@ async function waitForQuit(options) {
 
   const minutes = Number.isFinite(options.waitMinutes) ? options.waitMinutes : 0
   const deadline = minutes > 0 ? Date.now() + minutes * 60000 : 0
+  say(minutes > 0 ? '  最多等 ' + minutes + ' 分钟。超时就放弃，不改任何文件。' : '  会一直等到退出。')
   say('')
   let waited = 0
   while (isRunning(pid)) {
     if (deadline !== 0 && Date.now() > deadline) {
       say('  ✗ 等了 ' + minutes + ' 分钟，DSH 还没退出。')
       say('    未改动任何文件。要继续就再运行一次。')
+      sayLog()
       return false
     }
     await delay(500)
@@ -1016,71 +1113,86 @@ async function menu(resources, options) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2))
-  if (options.help) {
-    usage()
-    return 0
-  }
+  try {
+    if (options.help) {
+      usage()
+      return 0
+    }
 
-  // The cache lives under the app's user data, not beside app.asar, so this
-  // one command does not need an install directory at all.
-  if (options.action === 'cache') {
-    say('')
-    say('  DSH 聊天页缓存清理')
-    return cleanCache()
-  }
+    // The cache lives under the app's user data, not beside app.asar, so this
+    // one command does not need an install directory at all.
+    if (options.action === 'cache') {
+      say('')
+      say('  DSH 聊天页缓存清理')
+      return cleanCache()
+    }
 
-  const resources = options.resources !== undefined ? resolve(options.resources) : detectResources()
-  if (resources === undefined) {
-    say('')
-    say('  ✗ 没有找到 DSH 安装目录。常见位置：')
-    for (const candidate of resourcesCandidates()) say('      ' + candidate)
-    say('')
-    say('    装在别处请传进来：')
-    say('      node shell-patch.mjs apply --resources "<安装目录>/resources"')
-    say('')
-    return 1
-  }
-  if (!existsSync(join(resources, 'app.asar'))) {
-    say('')
-    say('  ✗ ' + resources + ' 里没有 app.asar，不像是 DSH 的安装目录。')
-    say('')
-    return 1
-  }
+    const resources = options.resources !== undefined ? resolve(options.resources) : detectResources()
+    if (resources === undefined) {
+      say('')
+      say('  ✗ 没有找到 DSH 安装目录。常见位置：')
+      for (const candidate of resourcesCandidates()) say('      ' + candidate)
+      say('')
+      say('    装在别处请传进来：')
+      say('      node shell-patch.mjs apply --resources "<安装目录>/resources"')
+      say('')
+      return 1
+    }
+    if (!existsSync(join(resources, 'app.asar'))) {
+      say('')
+      say('  ✗ ' + resources + ' 里没有 app.asar，不像是 DSH 的安装目录。')
+      say('')
+      return 1
+    }
 
-  // Anything that writes needs the directory to accept a file. Ask for
-  // elevation up front rather than halfway through a swap.
-  const writing = options.action === 'apply' || options.action === 'revert' || options.action === 'menu'
-  if (writing && !options.elevated && !canWrite(resources)) {
+    // Anything that writes needs the directory to accept a file. Ask for
+    // elevation up front rather than halfway through a swap.
+    const writing = options.action === 'apply' || options.action === 'revert' || options.action === 'menu'
+    if (writing && !options.elevated && !canWrite(resources)) {
+      say('')
+      say('  安装目录不可写，需要管理员权限。正在请求提权 …')
+      if (relaunchElevated(process.argv.slice(2))) return 0
+      say('')
+      say('  ✗ 没能提权。请手动以管理员身份运行：')
+      if (process.platform === 'win32') say('    右键 shell-patch.cmd →「以管理员身份运行」')
+      else say('    sudo node "' + SELF + '" ' + (options.action === 'menu' ? '' : options.action))
+      say('')
+      return 1
+    }
+
+    // A second click cannot stop the patcher already waiting: the task that
+    // started it has exited, so only the lock can keep two writers apart.
+    if (writing && options.restart === true && !claimPatcher(resources)) {
+      say('')
+      say('  已有一个补丁进程在等这次退出，这一次不再另起。')
+      say('')
+      return 0
+    }
+    if (writing) openLog(resources)
+
     say('')
-    say('  安装目录不可写，需要管理员权限。正在请求提权 …')
-    if (relaunchElevated(process.argv.slice(2))) return 0
+    say('  DSH「重启保持登录」补丁')
+    if (patchLog !== undefined) say('  日志       ' + patchLog)
+
+    let code
+    if (options.action === 'status') code = status(resources)
+    else if (options.action === 'apply') code = await apply(resources, options)
+    else if (options.action === 'revert') code = await revert(resources, options)
+    else if (options.action === 'cache') code = cleanCache()
+    else code = await menu(resources, options)
+
+    if (code === 0 && changed) {
+      say('')
+      say('  ──────────────────────────────────────')
+      say(reopened ? '  ✓ 完成，DSH 已重新打开。' : '  ✓ 完成。请重新打开 DSH 使其生效。')
+      say('  ──────────────────────────────────────')
+    }
     say('')
-    say('  ✗ 没能提权。请手动以管理员身份运行：')
-    if (process.platform === 'win32') say('    右键 shell-patch.cmd →「以管理员身份运行」')
-    else say('    sudo node "' + SELF + '" ' + (options.action === 'menu' ? '' : options.action))
-    say('')
-    return 1
+    return code
+  } finally {
+    releasePatcher()
+    forgetTask(options.task)
   }
-
-  say('')
-  say('  DSH「重启保持登录」补丁')
-
-  let code
-  if (options.action === 'status') code = status(resources)
-  else if (options.action === 'apply') code = await apply(resources, options)
-  else if (options.action === 'revert') code = await revert(resources, options)
-  else if (options.action === 'cache') code = cleanCache()
-  else code = await menu(resources, options)
-
-  if (code === 0 && changed) {
-    say('')
-    say('  ──────────────────────────────────────')
-    say(reopened ? '  ✓ 完成，DSH 已重新打开。' : '  ✓ 完成。请重新打开 DSH 使其生效。')
-    say('  ──────────────────────────────────────')
-  }
-  say('')
-  forgetTask(options.task)
-  return code
 }
 
 main().then(
@@ -1091,6 +1203,7 @@ main().then(
     say('')
     say('  ✗ ' + reasonOf(error))
     say('')
+    releasePatcher()
     forgetTask(pendingTask)
     process.exitCode = 1
   },

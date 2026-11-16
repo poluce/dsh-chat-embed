@@ -319,6 +319,7 @@ test('--restart waits for the app to exit, then swaps and reopens it', async () 
   assert.match(out, /完成，DSH 已重新打开/)
   assert.notEqual(hashOf(readFileSync(join(dir, 'app.asar'))), hashOf(original), 'the swap came after the exit')
   assert.equal(existsSync(join(dir, 'app.asar.new')), false, 'no staged file is left behind')
+  assert.equal(existsSync(join(dir, '.dsh-chat-embed-patch.lock')), false, 'the waiter released its lock')
 })
 
 test('--restart gives up rather than patching a DSH that never exits', async () => {
@@ -341,9 +342,62 @@ test('--restart gives up rather than patching a DSH that never exits', async () 
     assert.match(out, /还没退出/)
     assert.equal(archiveHash(dir), before, 'the archive was not touched')
     assert.equal(existsSync(join(dir, 'app.asar.new')), false, 'the staged copy was dropped')
+    assert.match(
+      readFileSync(join(dir, 'dsh-chat-embed-patch.log'), 'utf8'),
+      /还没退出/,
+      'the hidden console still leaves a sentence that says why',
+    )
+    assert.equal(existsSync(join(dir, '.dsh-chat-embed-patch.lock')), false, 'a give-up releases the lock')
   } finally {
     app.kill()
   }
+})
+
+test('a second --restart leaves the archive to the patcher already waiting', () => {
+  // The task wrapper exits in a second, so a second click cannot kill the first
+  // process. Without the lock both would rename the same archive.
+  const dir = install(buildAsar(ENTRIES))
+  const before = archiveHash(dir)
+  writeFileSync(join(dir, '.dsh-chat-embed-patch.lock'), String(process.pid))
+  const { code, out } = run([
+    'apply',
+    '--resources',
+    dir,
+    '--yes',
+    '--restart',
+    '--pid',
+    '99999999',
+    '--wait-minutes',
+    '0.01',
+  ])
+  assert.equal(code, 0, out)
+  assert.match(out, /已有一个补丁进程/)
+  assert.equal(archiveHash(dir), before, 'the second writer did not touch the archive')
+  assert.equal(existsSync(join(dir, 'app.asar.new')), false, 'and did not stage a rival copy')
+  assert.equal(
+    readFileSync(join(dir, '.dsh-chat-embed-patch.lock'), 'utf8').trim(),
+    String(process.pid),
+    'it must not delete the lock it does not own',
+  )
+})
+
+test('a stale patcher lock does not block the next run', async () => {
+  const dir = install(buildAsar(ENTRIES))
+  writeFileSync(join(dir, '.dsh-chat-embed-patch.lock'), '99999999')
+  const app = fakeApp(200)
+  const { code, out } = await runAsync([
+    'apply',
+    '--resources',
+    dir,
+    '--yes',
+    '--restart',
+    '--pid',
+    String(app.pid),
+    '--wait-minutes',
+    '1',
+  ])
+  assert.equal(code, 0, out)
+  assert.equal(existsSync(join(dir, '.dsh-chat-embed-patch.lock')), false, 'the new run took the stale lock and released it')
 })
 
 test('--restart without --exe asks the user to reopen DSH itself', async () => {

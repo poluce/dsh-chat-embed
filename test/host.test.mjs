@@ -8,10 +8,11 @@
 
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { afterEach } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { apply, internals } from '../index.js'
 
@@ -378,6 +379,12 @@ test('a started action runs the script with the shell as the process to wait for
   assert.ok(pidAt !== -1, 'the script waits for the shell, not for a retry loop')
   assert.equal(args[pidAt + 1], String(process.ppid))
   assert.equal(args.indexOf('--exe'), -1, 'a plain Node Host is nothing to relaunch')
+  const waitAt = args.indexOf('--wait-minutes')
+  assert.equal(
+    args[waitAt + 1],
+    String(internals.PATCH_WAIT_MINUTES),
+    'omitting this selects the 10-minute default, which gives up while the user is still in DSH',
+  )
 
   assert.equal(options.detached, true, 'it must outlive the Host')
   assert.equal(options.stdio, 'ignore')
@@ -529,6 +536,24 @@ test('the payload gets a console of its own', () => {
   const target = internals.patchTaskTarget('apply', { script: 's.mjs', resources: 'C:\\r\\resources' })
   assert.equal(target.execute, 'powershell.exe', 'the registered task runs the wrapper, not node directly')
   assert.match(target.argument, /-EncodedCommand /)
+})
+
+test('the switch wait outlasts one conversation, and the panel says the same number', () => {
+  // 2026-11-16: the click at 16:23 used the script's 10-minute default. The user
+  // quit at 16:42. The patcher had already deleted the staged archive and the
+  // task, so the restart found an untouched app.asar and no explanation.
+  const hours = internals.PATCH_WAIT_MINUTES / 60
+  assert.equal(hours, 12, 'the panel copy is written against this number')
+  const command = internals.patchTaskCommand('t', 'C:\\node.exe', 'a.mjs apply')
+  const limit = command.match(/-ExecutionTimeLimit \(New-TimeSpan -Minutes (\d+)\)/)
+  assert.ok(limit !== null, 'the task has a limit: ' + command)
+  assert.ok(
+    Number(limit[1]) >= internals.PATCH_WAIT_MINUTES,
+    'if the child fails to break away, the task limit must not cut the wait short',
+  )
+  const client = readFileSync(fileURLToPath(new URL('../client.js', import.meta.url)), 'utf8')
+  assert.match(client, new RegExp(String(hours) + ' hours'), 'the English hint names the same budget')
+  assert.match(client, new RegExp(String(hours) + ' 小时'), 'the Chinese hint names the same budget')
 })
 
 test('the patch task never fires on its own', () => {  // The task exists to be started now. A near-future trigger would run a second

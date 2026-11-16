@@ -63,10 +63,25 @@ const PATCH_TOKEN = randomUUID().replace(/-/g, '')
 /**
  * The Task Scheduler entry that carries the swap across DSH's exit.
  *
- * Named so that a second click can replace the first one instead of queueing a
- * second patcher behind it.
+ * The name lets a second click replace the task definition. It does not stop
+ * the patcher already waiting: that process was started detached, and the
+ * wrapper that the task runs has already exited. The script's lock is what
+ * refuses the second writer.
  */
 const PATCH_TASK = 'dsh-chat-embed-patch'
+
+/**
+ * How long the switch's patcher waits for the user to quit, in minutes.
+ *
+ * The click happens inside DSH, and the user keeps working there. The script's
+ * own default (10 minutes) is shorter than one conversation: it then deletes
+ * the staged archive and the task, and the later quit finds nothing waiting.
+ * Twelve hours covers a work day. The waiter only polls a pid; it does not
+ * hold app.asar open.
+ *
+ * The panel copy says "12 hours". Change both together.
+ */
+const PATCH_WAIT_MINUTES = 720
 
 /** Strings that identify the patch in a rebuilt archive. */
 const PATCH_MARK = 'persist:dsh-sidebar-'
@@ -483,6 +498,9 @@ function launchArgs(action, report) {
   if (Number.isInteger(pid) && pid > 0) args.push('--pid', String(pid))
   const exe = selfExecutable()
   if (exe !== undefined) args.push('--exe', exe)
+  // Passed explicitly: omitting it selects the script's 10-minute default,
+  // which gives up while the user is still in this conversation.
+  args.push('--wait-minutes', String(PATCH_WAIT_MINUTES))
   return args
 }
 
@@ -529,7 +547,14 @@ function patchTaskCommand(taskName, execute, argument) {
     '$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddDays(30)',
     // Belt and braces for the same reason: never run a second copy while one is
     // still waiting for DSH to close.
-    '$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20)',
+    // The registered action is a wrapper that exits in a second; the patcher is
+    // a Start-Process child and is not covered by this limit (measured: the
+    // task was Ready while that child was still running). If a build fails to
+    // break the child away, the limit becomes the wait's ceiling, so it has to
+    // outlast PATCH_WAIT_MINUTES.
+    '$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes ' +
+      String(PATCH_WAIT_MINUTES + 60) +
+      ')',
     `Register-ScheduledTask -TaskName ${quote(taskName)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
     `Start-ScheduledTask -TaskName ${quote(taskName)}`,
   ].join('; ')
@@ -809,6 +834,7 @@ export const internals = {
   detachedPayload,
   startPatchTask,
   PATCH_TASK,
+  PATCH_WAIT_MINUTES,
   PROBE_PATH,
   PATCH_PATH,
   PATCH_TOKEN,

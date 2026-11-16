@@ -286,7 +286,7 @@ let activeCtx = undefined
         persistOffBody: 'This removes the patch and puts the original app.asar back. Every restart will ask you to sign in again; flip the switch to undo.',
         patchPending: 'Patch ready',
         patchPendingHint:
-          'Quit DSH from the tray (right-click the tray icon → Quit). The archive is swapped and DSH reopens on its own.',
+          'Quit DSH from the tray (right-click the tray icon → Quit). The archive is swapped and DSH reopens on its own. You do not have to quit immediately — the script waits up to 12 hours.',
         patchNeedsAdmin: 'The install folder needs administrator rights, so it cannot run from here. Run the command below as administrator.',
         patchNoInstall: 'No DSH desktop install was found, so there is no shell to patch. Open this panel in the desktop app.',
         patchSame: 'Nothing to change: the shell archive is already in that state.',
@@ -382,7 +382,7 @@ let activeCtx = undefined
         persistOffTitle: '关闭「重启保持登录」？',
         persistOffBody: '会撤掉补丁、恢复原版 app.asar。之后每次重启都要重新登录；想再开启，再点一次这个开关即可。',
         patchPending: '补丁已就绪',
-        patchPendingHint: '请从托盘退出 DSH（右键托盘图标 →「退出」），退出后自动替换并重新打开。',
+        patchPendingHint: '请从托盘退出 DSH（右键托盘图标 →「退出」），退出后自动替换并重新打开。不必马上退出，脚本最多等 12 小时。',
         patchNeedsAdmin: '安装目录需要管理员权限，这里没法直接执行。请以管理员身份运行下面的命令。',
         patchNoInstall: '没有找到 DSH 桌面版安装目录，没有可以打补丁的壳。请在桌面版里打开本面板。',
         patchSame: '不用改：桌面壳档案已经是这个状态。',

@@ -173,7 +173,7 @@ this.configureSession(session.fromPartition(partition, { cache: false }))
 | 插件让它退出 | 插件跑在壳的**子进程**里，两者之间只有 `quit-inspection`（壳问插件"有任务在跑吗"）和 `updateTasks`，没有反方向的退出请求 |
 | 不退出直接换 | 运行中的 `app.asar` 被壳映射，Windows 上 `rename` 必然 EBUSY |
 
-所以开关把"等退出"这一步交给脚本的 `waitForExit`（`process.kill(pid, 0)` 轮询，`--pid` 由 Host 传入壳的 PID），超时（默认 10 分钟）就删掉暂存文件退出，**归档一个字节都不动**。
+所以开关把"等退出"这一步交给脚本的 `waitForQuit`（`process.kill(pid, 0)` 轮询，`--pid` 由 Host 传入壳的 PID）。Host 传入 `--wait-minutes 720`（12 小时）：命令行默认的 10 分钟比一次对话还短，超时后脚本会删掉暂存文件和计划任务再退出，人稍后才退出时什么都等不到。超时**归档一个字节都不动**。面板提示与这个 12 小时是同一个数字。
 
 读取 `app.asar` 一律走 Electron 的 `original-fs`：补丁过的 `node:fs` 把 `.asar` 当成压缩包——`readFileSync` 报 ENOENT、`statSync` 归零、`existsSync` 为 false、写入报 `Invalid package`。Host 与脚本各自在启动时选一次（有 `original-fs` 就用它，普通 Node 用 `node:fs`），否则探针会在桌面版里误报"没有安装目录"，脚本也会当场失败。
 
