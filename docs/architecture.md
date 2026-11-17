@@ -5,7 +5,7 @@
 目标运行环境：**`@deepseek-ai/dsh-desktop 0.2.2-rc.1`（Electron / Chromium）**。
 当前实现：**v0.6.14**（`client.js` 约 3985 行，85 项契约测试）。
 
-> **架构一句话**：聊天页直接渲染在**席位的布局盒**里（`.dce-panel.dce-inline`，`width/height:100%`），几何完全交给 CSS；席位只有两个 —— 中央主面板（`main`）和右栏聊天 tab —— 二者互斥，**哪边点哪边接管**，切换时 guest 重建一次并回到上次会话。
+> **架构一句话**：左右各有一份 webview，不共用页面，也不互相刷新。登录共用壳按 `workspace` 缓存的分区：两侧都 `acquire(同一个 workspace)`，一侧登入，另一侧再打开就是已登入。左栏页面住在 `document.body` 的 park 里，切走只隐藏；右栏页面住在列里面，收起跟着列消失，不会盖到会话上。
 
 ---
 
@@ -19,9 +19,10 @@
 | 挂上以后怎么导航 | 只能从 guest **文档内部**导航（`location.href`）；`loadURL()` / 改 `src` 无效 |
 | 登录态能撑多久 | 未打壳补丁：仅本次运行有效；**打补丁后**每个服务固定 disk 分区，跨重启免登录 |
 | 切换标签要重载吗 | 不用：guest 常驻，切标签只切 `data-active`（`display:none`） |
-| 切席主要重载吗 | 会重建一次（WebContents 随 DOM 销毁），随后用 `startUrlFor()` 回到上次会话地址 |
-| 两个席位能同时显示吗 | ❌ 互斥：右栏属于会话视图，中央打开聊天面板后右栏不可用 |
-| 多标签怎么隔离 | 每个服务一个 `workspace` 身份 → 独立分区（独立 cookie 罐）；每个服务一个 guest，各自一条租约 |
+| 切主面板要重载吗 | 左栏不用。页面在 park 里，`hidden` 保留 WebContents；回来是同一页 |
+| 右栏收起会盖到会话上吗 | 不会。右栏页面是列的子节点，收起跟着列隐藏，不搬到会话上 |
+| 两侧会同步刷新吗 | 不会。两份文档。登录态共享，是因为分区相同，不是因为页面相同 |
+| 多标签怎么隔离 | 每个服务一个 `workspace` → 一个分区。左右各一条租约、各一个 webview，分区名相同 |
 
 ---
 
@@ -278,23 +279,25 @@ guests: Map<providerId, {
 
 ### 9.4 `keepMounted` 与右栏
 
-右栏 tab 类型声明 `keepMounted: true`：切到别的右栏 tab 时 body 不卸载，guest 与其状态保留 —— 与壳自带浏览器、终端面板同机制。中央面板没有这个待遇（选别的主面板就卸载），这是两个席位的本质差异。
+右栏 tab 类型声明 `keepMounted: true`：切到别的右栏 tab 时 body 不卸载，右栏自己的 webview 就留在列里。中央面板没有这个待遇，所以左栏页面住在 park 里，不跟右栏页面是同一个元素。
 
 ---
 
-## 10. 席位模型：内联宿主与"哪边点哪边接管"
+## 10. 席位模型：左右各一份页面
 
 ### 10.1 为什么必须内联
 
-**Electron 在 `<webview>` 离开 DOM 时立即销毁其 WebContents**：重新插入等于重建，且无法"搬家"（搬 = detach + attach）。所以聊天页不能"先放别处、需要时挪进面板"，只能**渲染在席位自己的布局盒里**：
+**Electron 在 `<webview>` 离开 DOM 时立即销毁其 WebContents**，也不能把同一个元素从左栏搬到右栏。所以左右各建一份。左栏页面挂在 `document.body` 的 park 上（不能挂进壳的 grid，否则右栏打不开），切走收成 0×0 并加 `hidden`。右栏页面是列视口的子节点，收起跟着列走，不会留在会话上。
 
 ```text
-.dce-panel.dce-inline        position:relative; width:100%; height:100%; overflow:hidden
-  .dce-surface               position:absolute; inset:0; display:flex; flex-direction:column
-    .dce-tabs                标签条（可拖动排序）
-    .dce-status-bar          状态行（仅在加载中/失败时出现）
-    .dce-viewport            宿主视口（flex:1）—— 注册为 inlineHosts[seat]
-      .dce-guest-layer       每个服务一层；非激活层 display:none
+document.body（不在壳的 grid 里）
+  .dce-park                  position:fixed + CSS anchor；hidden 时 webview 仍在文档里
+    .dce-guest-layer         每个服务一层；非激活层 display:none
+      <webview>
+
+.dce-panel.dce-inline        席位外壳，切走会卸载；data-parked 时背景透明、页面区不吃点击
+  .dce-tabs                  标签条，z-index 高于 park
+  .dce-viewport              锚点（anchor-name），不是 webview 的父节点
 ```
 
 拖分隔条时浏览器做一次原生布局，**零 JS 测量、零 React 重渲染**。`dragProbe` 实测 `397 → 445 → 397`，`guestFollowed=true`。
@@ -308,7 +311,7 @@ guests: Map<providerId, {
 
 二者互斥：右栏属于**会话视图**，中央换成聊天面板后右栏会报 `no session surface is mounted`。
 
-### 10.3 接管规则
+### 10.3 各自托管
 
 ```text
 preferredSeat        用户最近一次"点开"的席位（挂载时写入；右栏 tab 被选中时也写入）
@@ -324,9 +327,11 @@ hostArea(host)       宿主是否真的有面积（0×0 的收起右栏不算可
 
 ### 10.4 切换的代价与恢复
 
-席位变化 → 旧宿主里的 guest 元素随 DOM 销毁 → `dropGuestsOutside()` 丢弃记录 → 在新宿主 `mountGuest()` 重建（新租约、同分区）→ `startUrlFor()` 用 `lastUrl` 回到上次会话。
+切回左栏只显示已有的 park，不申请新租约，所以不再出现「正在打开」。打开右栏会为那一侧单独 `acquire` 一次（新租约、同一分区）。收起右栏不调用 `placePark`，页面留在列里。
 
-- 只需一次页面加载，**不需要重新登录**（分区不变）；
+`destroySeat('main')` 只在没有 park 时销毁左栏页面。右栏页面不在这条路径上。
+
+- 显式「重新加载」仍会换租约；
 - 同源且地址仍可用才复用 `lastUrl`，否则回到服务入口；
 - 迁移失败（例如站点把会话 URL 改成一次性）时退回入口，行为与首次打开一致。
 

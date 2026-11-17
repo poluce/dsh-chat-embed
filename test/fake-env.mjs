@@ -92,6 +92,16 @@ export class FakeNode {
     if (this.parentNode !== null && this.parentNode !== undefined) this.parentNode.removeChild(this)
   }
 
+  /** @param {any} node @returns {boolean} */
+  contains(node) {
+    let current = node
+    while (current !== null && current !== undefined) {
+      if (current === this) return true
+      current = current.parentNode
+    }
+    return false
+  }
+
   setConnected(value) {
     this.isConnected = value
     for (const child of this.children) child.setConnected(value)

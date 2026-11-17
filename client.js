@@ -31,14 +31,16 @@
  *
  * Electron destroys a webview's WebContents as soon as the element leaves the
  * DOM, and re-parenting does not help either: a move is a detach plus an
- * attach. So the surface is rendered *inside* the panel or tab body showing
- * it (`.dce-panel.dce-inline`, `width/height:100%`) and the browser owns the
- * geometry - no measurement, no per-frame JS.
+ * attach. The shell also unmounts the center panel whenever another panel is
+ * selected, so a guest that lived in that panel would be destroyed on every
+ * trip back to 「聊天」 and the status line would say 「正在打开」 again.
  *
- * Two seats can show it: the central panel (`main`) and the right sidebar tab.
- * They are mutually exclusive because the right sidebar belongs to a Session,
- * so whichever seat the user opens claims the guests. Switching seats rebuilds
- * the guest once; the last conversation URL is restored, so no re-login.
+ * The two seats do not share a page. Each has its own webview. They do share
+ * a partition: both call `acquire(workspace)`, and the shell caches one
+ * partition per workspace, so a sign-in on either side is the sign-in for both.
+ * The left page lives in a park that is shown only while the chat panel is on
+ * screen. The right page lives inside the right column, so collapsing that
+ * column hides it instead of painting it over the conversation.
  *
  * ## Per-tab lifecycle
  *
@@ -843,21 +845,38 @@ let activeCtx = undefined
     // Active tab
     // ------------------------------------------------------------------
 
-    function readStoredActive() {
+    /**
+     * @param {'main' | 'right' | undefined} [seat]
+     * @returns {'main' | 'right'}
+     */
+    function seatOf(seat) {
+      return seat === 'right' ? 'right' : 'main'
+    }
+
+    /** @param {'main' | 'right' | undefined} [seat] @returns {string} */
+    function activeStorageKey(seat) {
+      return seatOf(seat) === 'right' ? ACTIVE_TAB_KEY + ':right' : ACTIVE_TAB_KEY
+    }
+
+    /** @param {'main' | 'right' | undefined} [seat] */
+    function readStoredActive(seat) {
       try {
         if (typeof localStorage === 'undefined' || localStorage === null) return DEFAULT_PROVIDER
-        const stored = localStorage.getItem(ACTIVE_TAB_KEY)
+        const stored = localStorage.getItem(activeStorageKey(seat))
         return findProvider(stored) === undefined ? DEFAULT_PROVIDER : stored
       } catch (error) {
         return DEFAULT_PROVIDER
       }
     }
 
-    /** @param {string} id */
-    function storeActive(id) {
+    /**
+     * @param {string} id
+     * @param {'main' | 'right' | undefined} [seat]
+     */
+    function storeActive(id, seat) {
       try {
         if (typeof localStorage === 'undefined' || localStorage === null) return
-        localStorage.setItem(ACTIVE_TAB_KEY, id)
+        localStorage.setItem(activeStorageKey(seat), id)
       } catch (error) {
         void error
       }
@@ -1003,32 +1022,40 @@ let activeCtx = undefined
         enabledIds = normalizeEnabled(tabOrder.filter((entryId) => entryId === id || isEnabled(entryId)))
       } else {
         enabledIds = enabledIds.filter((entryId) => entryId !== id)
-        const record = guestRecord(id)
-        if (record.element !== undefined && record.element !== null) dropGuest(record)
+        for (const seat of ['main', 'right']) {
+          const record = guests.get(seat + ':' + id)
+          if (record !== undefined && record.element !== undefined && record.element !== null) dropGuest(record)
+        }
       }
       storeEnabled()
 
-      if (on === false && state.active === id) {
+      if (on === false && (activeBySeat.main === id || activeBySeat.right === id)) {
         const next = firstEnabled()
-        state.active = next
-        storeActive(next)
-        syncLayers()
+        for (const seat of ['main', 'right']) {
+          if (activeBySeat[seat] !== id) continue
+          assignSeatActive(seat, next)
+          syncLayers(seat)
+          void ensureActiveGuest(seat)
+        }
         notify()
-        void ensureActiveGuest()
         return true
       }
       notify()
-      if (on) void ensureActiveGuest()
+      if (on) {
+        void ensureActiveGuest('main')
+        void ensureActiveGuest('right')
+      }
       return true
     }
 
     /** Move the active tab to a still-enabled provider when it was hidden. */
     function reconcileActive() {
-      if (isEnabled(state.active)) return
       const next = findProvider(firstEnabled())
       if (next === undefined) return
-      state.active = next.id
-      storeActive(next.id)
+      for (const seat of ['main', 'right']) {
+        if (isEnabled(activeBySeat[seat])) continue
+        assignSeatActive(seat, next.id)
+      }
     }
 
     /**
@@ -1057,15 +1084,35 @@ let activeCtx = undefined
 
     /** @type {{ active: string, surface: { host: any } }} */
     const state = {
-      active: readStoredActive(),
+      active: readStoredActive('main'),
       surface: { host: null },
+    }
+
+    /** @type {{ main: string, right: string }} the selected tab on each seat */
+    const activeBySeat = {
+      main: state.active,
+      right: readStoredActive('right'),
+    }
+
+    /**
+     * @param {'main' | 'right'} seat
+     * @param {string} id
+     */
+    function assignSeatActive(seat, id) {
+      const which = seatOf(seat)
+      activeBySeat[which] = id
+      if (which === 'main') state.active = id
+      storeActive(id, which)
     }
 
     reconcileActive()
 
-    /** @returns {object} the active provider record. */
-    function activeProvider() {
-      const provider = findProvider(state.active)
+    /**
+     * @param {'main' | 'right' | undefined} [seat]
+     * @returns {object} the active provider record for that seat.
+     */
+    function activeProvider(seat) {
+      const provider = findProvider(activeBySeat[seatOf(seat)])
       if (provider !== undefined && isEnabled(provider.id)) return provider
       const fallback = findProvider(firstEnabled())
       return fallback !== undefined ? fallback : PROVIDERS[0]
@@ -1117,8 +1164,8 @@ let activeCtx = undefined
      * @param {any} provider
      * @returns {string}
      */
-    function startUrlFor(provider) {
-      const remembered = lastUrls.get(provider.id)
+    function startUrlFor(provider, seat) {
+      const remembered = lastUrls.get(seatOf(seat) + ':' + provider.id)
       if (typeof remembered !== 'string' || remembered === '') return provider.url
       if (!remembered.startsWith(provider.origin)) return provider.url
       if (!isLiveUrl(remembered)) return provider.url
@@ -1126,11 +1173,21 @@ let activeCtx = undefined
       return remembered
     }
 
-    /** @returns {GuestRecord} */
-    function guestRecord(id) {
-      let record = guests.get(id)
+    /**
+     * One record per seat. The two webviews share a partition, not a document.
+     *
+     * @param {string} id
+     * @param {'main' | 'right' | undefined} [seat]
+     * @returns {GuestRecord}
+     */
+    function guestRecord(id, seat) {
+      const which = seatOf(seat)
+      const key = which + ':' + id
+      let record = guests.get(key)
       if (record === undefined) {
         record = {
+          id,
+          seat: which,
           element: undefined,
           lease: undefined,
           partition: undefined,
@@ -1153,14 +1210,17 @@ let activeCtx = undefined
           handoff: '',
           selfTest: '',
         }
-        guests.set(id, record)
+        guests.set(key, record)
       }
       return record
     }
 
-    /** @returns {{ phase: string, detail: string }} */
-    function getStatus() {
-      const record = guestRecord(state.active)
+    /**
+     * @param {'main' | 'right' | undefined} [seat]
+     * @returns {{ phase: string, detail: string }}
+     */
+    function getStatus(seat) {
+      const record = guestRecord(activeBySeat[seatOf(seat)], seat)
       return { phase: record.phase, detail: record.detail }
     }
 
@@ -1168,9 +1228,10 @@ let activeCtx = undefined
      * @param {string} id
      * @param {string} phase
      * @param {string} [detail]
+     * @param {'main' | 'right' | undefined} [seat]
      */
-    function setPhase(id, phase, detail) {
-      const record = guestRecord(id)
+    function setPhase(id, phase, detail, seat) {
+      const record = guestRecord(id, seat)
       if (record.phase === phase && record.detail === (detail === undefined ? '' : detail)) return
       record.phase = phase
       record.detail = detail === undefined ? '' : detail
@@ -1324,29 +1385,57 @@ let activeCtx = undefined
       }
     }
 
-    /** @param {object} provider */
-    function layerFor(provider) {
-      const record = guestRecord(provider.id)
+    /**
+     * Where a new guest layer is attached.
+     *
+     * Left pages live in the park so the chat panel can unmount without
+     * destroying them. Right pages live in the column, so a collapse hides
+     * them with the column instead of leaving a fixed box on the conversation.
+     *
+     * @param {'main' | 'right' | undefined} [seat]
+     * @returns {any}
+     */
+    function guestHome(seat) {
+      if (seatOf(seat) === 'right') return inlineHosts.right
+      const park = ensurePark()
+      if (park !== undefined) return park
+      if (inlineHosts.main !== null && inlineHosts.main !== undefined) return inlineHosts.main
+      return state.surface.host
+    }
+
+    /**
+     * @param {object} provider
+     * @param {'main' | 'right' | undefined} [seat]
+     */
+    function layerFor(provider, seat) {
+      const which = seatOf(seat)
+      const record = guestRecord(provider.id, which)
       if (record.layer !== undefined && record.layer !== null && record.layer.isConnected !== false) {
         return record.layer
       }
-      const host = state.surface.host
+      const host = guestHome(which)
       if (host === null || host === undefined) return undefined
       const layer = document.createElement('div')
       layer.className = 'dce-guest-layer'
       layer.setAttribute('data-provider', provider.id)
-      layer.setAttribute('data-active', provider.id === state.active ? 'true' : 'false')
+      layer.setAttribute('data-seat', which)
+      layer.setAttribute('data-active', provider.id === activeBySeat[which] ? 'true' : 'false')
       host.appendChild(layer)
       record.layer = layer
       return layer
     }
 
-    /** Show only the active provider's layer; hidden layers keep their guest. */
-    function syncLayers() {
-      for (const provider of PROVIDERS) {
-        const record = guests.get(provider.id)
-        if (record === undefined || record.layer === undefined || record.layer === null) continue
-        const want = provider.id === state.active ? 'true' : 'false'
+    /**
+     * Show only that seat's active layer. The other seat is not touched.
+     *
+     * @param {'main' | 'right' | undefined} [seat]
+     */
+    function syncLayers(seat) {
+      const which = seat === undefined ? undefined : seatOf(seat)
+      for (const record of guests.values()) {
+        if (which !== undefined && record.seat !== which) continue
+        if (record.layer === undefined || record.layer === null) continue
+        const want = record.id === activeBySeat[record.seat] ? 'true' : 'false'
         if (record.layer.getAttribute('data-active') !== want) record.layer.setAttribute('data-active', want)
       }
     }
@@ -1357,10 +1446,11 @@ let activeCtx = undefined
      * @param {string} id
      * @returns {Promise<void>}
      */
-    async function mountGuest(id) {
+    async function mountGuest(id, seat) {
+      const which = seatOf(seat)
       const provider = findProvider(id)
       if (provider === undefined) return
-      const record = guestRecord(id)
+      const record = guestRecord(id, which)
 
       if (record.mounting === true) return
       if (record.element !== undefined && record.element !== null) {
@@ -1369,7 +1459,7 @@ let activeCtx = undefined
         dropGuest(record)
       }
 
-      const layer = layerFor(provider)
+      const layer = layerFor(provider, which)
       if (layer === undefined) return
 
       record.mounting = true
@@ -1379,11 +1469,11 @@ let activeCtx = undefined
       try {
         const bridge = desktopBrowser()
         if (bridge === undefined) {
-          setPhase(id, PHASE.UNSUPPORTED, '')
+          setPhase(id, PHASE.UNSUPPORTED, '', which)
           return
         }
 
-        setPhase(id, PHASE.ACQUIRING, '')
+        setPhase(id, PHASE.ACQUIRING, '', which)
         let lease
         let partition
         try {
@@ -1395,11 +1485,11 @@ let activeCtx = undefined
             throw new Error('desktop shell returned no partition')
           }
         } catch (error) {
-          if (generation === record.generation) setPhase(id, PHASE.FAILED, messageOf(error))
+          if (generation === record.generation) setPhase(id, PHASE.FAILED, messageOf(error), which)
           return
         }
 
-        log('info', 'lease acquired', { provider: id, partition: shortId(partition) })
+        log('info', 'lease acquired', { provider: id, seat: which, partition: shortId(partition) })
 
         // Teardown or reload happened while the lease was in flight.
         if (generation !== record.generation) {
@@ -1420,12 +1510,12 @@ let activeCtx = undefined
         element.style.cssText = 'display:inline-flex;width:100%;height:100%;border:0;background:transparent;'
 
         const handlers = {
-          ready: (event) => onGuestReady(id, event),
-          failed: (event) => onGuestFailed(id, event),
-          navigate: (event) => onGuestNavigated(id, event !== undefined && event !== null ? event.url : ''),
-          navigateInPage: (event) => onGuestLocation(id, event !== undefined && event !== null ? event.url : ''),
-          stop: () => onGuestStopped(id),
-          crash: () => onGuestCrashed(id),
+          ready: (event) => onGuestReady(id, event, which),
+          failed: (event) => onGuestFailed(id, event, which),
+          navigate: (event) => onGuestNavigated(id, event !== undefined && event !== null ? event.url : '', which),
+          navigateInPage: (event) => onGuestLocation(id, event !== undefined && event !== null ? event.url : '', which),
+          stop: () => onGuestStopped(id, which),
+          crash: () => onGuestCrashed(id, which),
         }
         element.addEventListener('dom-ready', handlers.ready)
         element.addEventListener('did-fail-load', handlers.failed)
@@ -1443,13 +1533,13 @@ let activeCtx = undefined
         record.mounts += 1
         // A mount is a fresh document load. Printing the count makes "one page
         // in the tab" distinguishable from "the tab was rebuilt" in the ring.
-        log('info', 'guest mounted', { provider: id, mount: record.mounts })
+        log('info', 'guest mounted', { provider: id, seat: which, mount: record.mounts })
 
         try {
           layer.appendChild(element)
         } catch (error) {
           dropGuest(record)
-          setPhase(id, PHASE.FAILED, messageOf(error))
+          setPhase(id, PHASE.FAILED, messageOf(error), which)
           return
         }
 
@@ -1457,12 +1547,12 @@ let activeCtx = undefined
         // so a reload or teardown cannot leave a listener behind.
         if (typeof bridge.onOpenRequested === 'function') {
           try {
-            record.popupOff = bridge.onOpenRequested(lease, (url) => onGuestPopup(id, url))
+            record.popupOff = bridge.onOpenRequested(lease, (url) => onGuestPopup(id, url, which))
           } catch (error) {
             record.popupOff = undefined
           }
         }
-        setPhase(id, PHASE.NAVIGATING, '')
+        setPhase(id, PHASE.NAVIGATING, '', which)
       } finally {
         record.mounting = false
         syncLayers()
@@ -1480,11 +1570,12 @@ let activeCtx = undefined
      * @param {any} element
      * @returns {Promise<void>}
      */
-    async function navigateGuest(id, element) {
+    async function navigateGuest(id, element, seat) {
+      const which = seatOf(seat)
       const provider = findProvider(id)
       if (provider === undefined) return
-      const record = guestRecord(id)
-      const target = startUrlFor(provider)
+      const record = guestRecord(id, which)
+      const target = startUrlFor(provider, which)
       const deadline = Date.now() + NAVIGATE_TIMEOUT_MS
       let issued = 0
 
@@ -1492,8 +1583,8 @@ let activeCtx = undefined
         if (element !== record.element) return
         const landed = guestUrl(element)
         if (isLiveUrl(landed)) {
-          if (landed !== '') lastUrls.set(id, landed)
-          setPhase(id, PHASE.READY, '')
+          if (landed !== '') lastUrls.set(which + ':' + id, landed)
+          setPhase(id, PHASE.READY, '', which)
           return
         }
         const loading = guestLoading(element)
@@ -1514,34 +1605,34 @@ let activeCtx = undefined
         await delay(NAVIGATE_RETRY_MS)
       }
       if (element !== record.element) return
-      setPhase(id, PHASE.FAILED, 'navigation-timeout')
+      setPhase(id, PHASE.FAILED, 'navigation-timeout', which)
     }
 
     /**
      * @param {string} id
      * @param {any} event
      */
-    function onGuestReady(id, event) {
-      const record = guestRecord(id)
+    function onGuestReady(id, event, seat) {
+      const record = guestRecord(id, seat)
       const element =
         event !== undefined && event !== null && event.currentTarget !== undefined ? event.currentTarget : record.element
       if (element === undefined || element !== record.element) return
       if (record.navigated) return
       record.navigated = true
-      void navigateGuest(id, element)
+      void navigateGuest(id, element, seat)
     }
 
     /**
      * @param {string} id
      * @param {any} event
      */
-    function onGuestFailed(id, event) {
-      const record = guestRecord(id)
+    function onGuestFailed(id, event, seat) {
+      const record = guestRecord(id, seat)
       const element =
         event !== undefined && event !== null && event.currentTarget !== undefined ? event.currentTarget : record.element
       if (element === undefined || element !== record.element) return
       if (event !== undefined && event !== null && event.errorCode === -3) return
-      setPhase(id, PHASE.FAILED, 'load-failed')
+      setPhase(id, PHASE.FAILED, 'load-failed', seat)
       log('warn', 'guest failed to load', { provider: id })
     }
 
@@ -1551,11 +1642,11 @@ let activeCtx = undefined
      * @param {string} id
      * @param {string} url
      */
-    function onGuestLocation(id, url) {
-      const record = guestRecord(id)
+    function onGuestLocation(id, url, seat) {
+      const record = guestRecord(id, seat)
       if (typeof url === 'string' && url !== '') {
         record.lastUrl = url
-        lastUrls.set(id, url)
+        lastUrls.set(seatOf(seat) + ':' + id, url)
       }
     }
 
@@ -1600,13 +1691,13 @@ let activeCtx = undefined
      *
      * @param {string} id
      */
-    function onGuestStopped(id) {
-      const record = guestRecord(id)
+    function onGuestStopped(id, seat) {
+      const record = guestRecord(id, seat)
       const element = record.element
       if (element === undefined || element === null) return
       const url = guestUrl(element)
       record.lastUrl = url
-      if (typeof url === 'string' && url !== '' && isLiveUrl(url)) lastUrls.set(id, url)
+      if (typeof url === 'string' && url !== '' && isLiveUrl(url)) lastUrls.set(seatOf(seat) + ':' + id, url)
       record.lastEvent = 'did-stop-loading'
 
       // Google's popup-handoff page cannot finish without an opener: return to
@@ -1630,7 +1721,7 @@ let activeCtx = undefined
         record.reloadTimer = setTimeout(() => {
           record.reloadTimer = undefined
           if (record.element !== element) return
-          void reloadGuest(id)
+          void reloadGuest(id, seat)
         }, TIMINGS.oauthRecoveryReloadMs)
         return
       }
@@ -1645,10 +1736,10 @@ let activeCtx = undefined
      *
      * @param {string} id
      */
-    function onGuestCrashed(id) {
-      const record = guestRecord(id)
+    function onGuestCrashed(id, seat) {
+      const record = guestRecord(id, seat)
       if (record.element === undefined || record.element === null) return
-      setPhase(id, PHASE.FAILED, 'renderer-gone')
+      setPhase(id, PHASE.FAILED, 'renderer-gone', seat)
       record.lastEvent = 'renderer-gone'
       log('error', 'renderer gone', { provider: id })
       notify()
@@ -1665,8 +1756,8 @@ let activeCtx = undefined
      * @param {string} id
      * @param {string} url
      */
-    function onGuestPopup(id, url) {
-      const record = guestRecord(id)
+    function onGuestPopup(id, url, seat) {
+      const record = guestRecord(id, seat)
       const element = record.element
       if (element === undefined || element === null) return
       if (typeof url !== 'string' || url.indexOf('https://') !== 0) return
@@ -1692,8 +1783,8 @@ let activeCtx = undefined
      * @param {string} id
      * @param {string} url
      */
-    function onGuestNavigated(id, url) {
-      const record = guestRecord(id)
+    function onGuestNavigated(id, url, seat) {
+      const record = guestRecord(id, seat)
       const provider = findProvider(id)
       if (provider === undefined) return
       const host = hostOf(url)
@@ -1710,7 +1801,7 @@ let activeCtx = undefined
       if (record.oauthPending !== true) return
       if (host !== hostOf(provider.origin)) return
       record.oauthPending = false
-      scheduleOAuthRecovery(id, provider)
+      scheduleOAuthRecovery(id, provider, seat)
     }
 
     /** @param {GuestRecord} record */
@@ -1751,8 +1842,8 @@ let activeCtx = undefined
      * @param {string} id
      * @param {object} provider
      */
-    function scheduleOAuthRecovery(id, provider) {
-      const record = guestRecord(id)
+    function scheduleOAuthRecovery(id, provider, seat) {
+      const record = guestRecord(id, seat)
       clearRecoveryTimer(record)
 
       record.recoveryTimer = setTimeout(() => {
@@ -1799,21 +1890,23 @@ let activeCtx = undefined
      * @param {string} id
      * @returns {Promise<void>}
      */
-    async function reloadGuest(id) {
-      const record = guestRecord(id)
-      log('info', 'reload requested', { provider: id })
+    async function reloadGuest(id, seat) {
+      const which = seatOf(seat)
+      const record = guestRecord(id, which)
+      log('info', 'reload requested', { provider: id, seat: which })
       record.generation += 1
       dropGuest(record)
-      setPhase(id, PHASE.IDLE, '')
-      await mountGuest(id)
+      setPhase(id, PHASE.IDLE, '', which)
+      await mountGuest(id, which)
     }
     /** Release every guest; used on plugin unload. */
     /** @param {string} [reason] */
     function destroyGuests(reason) {
-      for (const [id, record] of guests) {
+      for (const record of guests.values()) {
         record.generation += 1
         dropGuest(record, reason)
-        setPhase(id, PHASE.IDLE, '')
+        record.phase = PHASE.IDLE
+        record.detail = ''
         if (record.layer !== undefined && record.layer !== null) {
           try {
             if (record.layer.parentNode !== null && record.layer.parentNode !== undefined) {
@@ -1825,6 +1918,8 @@ let activeCtx = undefined
           record.layer = undefined
         }
       }
+      discardPark()
+      notify()
     }
 
     /** @param {{left:number,top:number,width:number,height:number}} rect @returns {string} */
@@ -1888,15 +1983,18 @@ let activeCtx = undefined
      */
     /**
      * A guest element cannot move between hosts (Electron destroys the
-     * WebContents with its DOM), so guests that are not inside the new host are
-     * dropped and rebuilt there.
+     * WebContents with its DOM). Used only when the persistent park is absent
+     * (tests, or a shell frame we could not find): guests that are not inside
+     * the new host are dropped and rebuilt there. With a park, guests stay put
+     * and the park is shown or hidden instead.
      *
      * @param {any} host
      */
-    function dropGuestsOutside(host) {
-      for (const provider of PROVIDERS) {
-        const record = guests.get(provider.id)
-        if (record === undefined || record.element === undefined || record.element === null) continue
+    function dropGuestsOutside(host, seat) {
+      const which = seatOf(seat)
+      for (const record of guests.values()) {
+        if (record.seat !== which) continue
+        if (record.element === undefined || record.element === null) continue
         const element = record.element
         const inside = typeof host.contains === 'function' ? host.contains(element) : false
         if (inside) continue
@@ -1925,17 +2023,308 @@ let activeCtx = undefined
       if (patch !== undefined && patch !== null && patch.host !== undefined) setHost(patch.host)
     }
 
-    function resolveInlineHost() {
-      const seat = inlineSeat()
-      const chosen = seat === undefined ? null : inlineHosts[seat]
-      if (chosen !== state.surface.host) log('info', 'host resolved', { seat: seat === undefined ? 'none' : seat })
-      setHost(chosen)
-      if (chosen === null) destroyGuests('no viewport')
-      else {
-        dropGuestsOutside(chosen)
-        void ensureActiveGuest()
+    /**
+     * Guest park. Created once, appended to `document.body`, never moved.
+     * `hidden` keeps the webview in the document — the same trick the shell
+     * uses for a keepMounted tab — so coming back is a reveal, not a reload.
+     *
+     * @type {any}
+     */
+    let parkNode = undefined
+    /** @type {'main' | 'right' | 'stowed'} */
+    let parkMode = 'stowed'
+    /** @type {any} */
+    let anchorNode = undefined
+
+    /** @param {any} node @returns {any[]} */
+    function childElements(node) {
+      if (node === null || node === undefined) return []
+      if (Array.isArray(node.children)) return node.children
+      if (typeof node.children === 'object' && node.children !== null && typeof node.children.length === 'number') {
+        try {
+          return Array.from(node.children)
+        } catch (error) {
+          void error
+        }
       }
-      return chosen
+      return []
+    }
+
+    /**
+     * @param {any} root
+     * @param {string} name
+     * @returns {any}
+     */
+    function findByAttribute(root, name) {
+      if (root === null || root === undefined) return undefined
+      if (typeof root.querySelector === 'function') {
+        try {
+          const hit = root.querySelector('[' + name + ']')
+          if (hit !== null && hit !== undefined) return hit
+        } catch (error) {
+          void error
+        }
+      }
+      const stack = childElements(root).slice()
+      while (stack.length > 0) {
+        const node = stack.pop()
+        if (node !== undefined && node !== null && typeof node.hasAttribute === 'function' && node.hasAttribute(name)) {
+          return node
+        }
+        const kids = childElements(node)
+        for (let index = kids.length - 1; index >= 0; index -= 1) stack.push(kids[index])
+      }
+      return undefined
+    }
+
+    /**
+     * The shell frame is present when the right column marker exists. Without
+     * it (the contract tests, a page that is not the desktop shell) there is
+     * no stable park, and guests stay in the seat viewport.
+     *
+     * @returns {boolean}
+     */
+    function shellFramePresent() {
+      const root = typeof document !== 'undefined' && document !== null ? document.body : undefined
+      return findByAttribute(root, 'data-rightbar-col') !== undefined
+    }
+
+    /** @returns {boolean} */
+    function anchorReady() {
+      try {
+        return (
+          typeof CSS !== 'undefined' &&
+          CSS !== null &&
+          typeof CSS.supports === 'function' &&
+          CSS.supports('anchor-name: --dce')
+        )
+      } catch (error) {
+        void error
+        return false
+      }
+    }
+
+    /** @returns {boolean} */
+    function parkIsLive() {
+      return parkNode !== undefined && parkNode !== null && parkNode.isConnected !== false
+    }
+
+    /**
+     * @returns {any} the park element, or undefined when this page has no shell frame
+     */
+    /**
+     * Parent that outlives panel switches and is not a grid item of the frame.
+     *
+     * The frame is `display:grid`. An extra child there — even `position:fixed`
+     * — is still a grid item in this shell and steals a track, which is why the
+     * right column then refuses to open. `document.body` is outside that grid.
+     * The corner radius is copied from the frame when the park is shown.
+     *
+     * @returns {any}
+     */
+    function parkParent() {
+      return document.body
+    }
+
+    function ensurePark() {
+      if (shellFramePresent() !== true) return undefined
+      if (parkIsLive() === true) return parkNode
+      const parent = parkParent()
+      if (parent === null || parent === undefined) return undefined
+      const node = document.createElement('div')
+      node.className = 'dce-park'
+      node.setAttribute('data-dce-park', 'true')
+      node.setAttribute('hidden', '')
+      parent.appendChild(node)
+      parkNode = node
+      parkMode = 'stowed'
+      return node
+    }
+
+    function clearAnchor() {
+      if (anchorNode !== undefined && anchorNode !== null && typeof anchorNode.removeAttribute === 'function') {
+        try {
+          anchorNode.removeAttribute('data-dce-anchor')
+        } catch (error) {
+          void error
+        }
+      }
+      anchorNode = undefined
+    }
+
+    function stowPark() {
+      if (parkNode === undefined || parkNode === null) return
+      clearAnchor()
+      parkNode.setAttribute('hidden', '')
+      parkNode.setAttribute('data-mode', 'stowed')
+      // A fixed box with no anchor falls back to covering the window and eats
+      // the right-sidebar expand button. Zero the box, don't just rely on hidden.
+      if (parkNode.style !== undefined && parkNode.style !== null) {
+        parkNode.style.cssText = 'position:fixed;width:0;height:0;pointer-events:none'
+      }
+      if (parkMode !== 'stowed') {
+        log('info', 'guests stowed', { reason: 'seat hidden' })
+        parkMode = 'stowed'
+      }
+    }
+
+    /**
+     * Show the park over the seat the user is looking at. The element itself
+     * does not move; only its CSS box does.
+     *
+     * @param {'main' | 'right'} seat
+     * @param {any} chosen
+     * @param {any} park
+     */
+    /**
+     * @param {any} chosen
+     * @returns {{ left: number, top: number, width: number, height: number } | undefined}
+     */
+    function seatBox(chosen) {
+      if (chosen === null || chosen === undefined || typeof chosen.getBoundingClientRect !== 'function') return undefined
+      const box = chosen.getBoundingClientRect()
+      if (box === undefined || box === null) return undefined
+      return {
+        left: box.left,
+        top: box.top,
+        width: box.width,
+        height: box.height,
+      }
+    }
+
+    function revealPark(seat, chosen, park) {
+      const box = seatBox(chosen)
+      // A closed right column is 0×0. Showing the park then either covers the
+      // expand button or hides the page the user is still looking at.
+      if (box === undefined || box.width < 2 || box.height < 2) {
+        stowPark()
+        return
+      }
+      clearAnchor()
+      park.removeAttribute('hidden')
+      park.setAttribute('data-mode', seat)
+      if (typeof chosen.setAttribute === 'function') {
+        chosen.setAttribute('data-dce-anchor', 'true')
+        anchorNode = chosen
+      }
+      // Always pin a real box. CSS anchor tracks a splitter with no JS, but an
+      // unanchored fixed element covers the window — that is what made the
+      // right sidebar's expand button unclickable. Inline pixels are the floor;
+      // anchor overrides them only where the seat actually has a box.
+      const radius = seat === 'main' ? contentRadius() : '0'
+      if (park.style !== undefined && park.style !== null) {
+        park.style.cssText =
+          'position:fixed;z-index:1;pointer-events:auto;margin:0;top:' +
+          box.top +
+          'px;left:' +
+          box.left +
+          'px;width:' +
+          box.width +
+          'px;height:' +
+          box.height +
+          'px;border-radius:' +
+          radius +
+          ' 0 0 0'
+      }
+      parkMode = seat
+    }
+
+    /** @returns {string} */
+    function contentRadius() {
+      try {
+        if (typeof getComputedStyle !== 'function') return '0'
+        const overlay = typeof document.querySelector === 'function' ? document.querySelector('[data-shell-overlay]') : null
+        const host =
+          overlay !== null && overlay !== undefined && overlay.parentElement !== null && overlay.parentElement !== undefined
+            ? overlay.parentElement
+            : document.documentElement
+        if (host === null || host === undefined) return '0'
+        const value = getComputedStyle(host).getPropertyValue('--dsh-windows-content-radius')
+        return typeof value === 'string' && value.trim() !== '' ? value.trim() : '0'
+      } catch (error) {
+        void error
+        return '0'
+      }
+    }
+
+    /**
+     * @param {string | undefined} seat
+     * @param {any} chosen
+     * @returns {boolean | 'stowed'} true when the park is the guest home and showing
+     */
+    function placePark(seat, chosen) {
+      // The park is the left page only. A right column, a collapsed column, or
+      // the conversation must never receive this box.
+      if (seat !== 'main' || chosen === null || chosen === undefined || hostArea(chosen) < 2) {
+        const live = parkIsLive()
+        stowPark()
+        return live === true ? 'stowed' : false
+      }
+      const park = ensurePark()
+      if (park === undefined) return false
+      revealPark('main', chosen, park)
+      return true
+    }
+
+    function discardPark() {
+      clearAnchor()
+      const node = parkNode
+      parkNode = undefined
+      parkMode = 'stowed'
+      if (node === undefined || node === null) return
+      try {
+        if (node.parentNode !== null && node.parentNode !== undefined) node.parentNode.removeChild(node)
+      } catch (error) {
+        void error
+      }
+    }
+
+    function resolveInlineHost() {
+      const main = inlineHosts.main
+      const visible = main !== null && main !== undefined && hostArea(main) >= 2
+      if (visible) {
+        const parked = placePark('main', main)
+        setHost(main)
+        if (parked !== true && parkIsLive() !== true) dropGuestsOutside(main, 'main')
+        void ensureActiveGuest('main')
+      } else {
+        stowPark()
+        setHost(null)
+        // The left page stays in the park. Destroying it here is 「正在打开」
+        // on the way back. Without a park there is nothing to hide.
+        if (parkIsLive() !== true) destroySeat('main', 'no viewport')
+      }
+      const right = inlineHosts.right
+      if (right !== null && right !== undefined && hostArea(right) >= 2) void ensureActiveGuest('right')
+      return visible ? main : null
+    }
+
+    /**
+     * Drop one seat's guests. The other seat keeps its own page.
+     *
+     * @param {'main' | 'right'} seat
+     * @param {string} [reason]
+     */
+    function destroySeat(seat, reason) {
+      const which = seatOf(seat)
+      for (const record of guests.values()) {
+        if (record.seat !== which) continue
+        record.generation += 1
+        dropGuest(record, reason)
+        record.phase = PHASE.IDLE
+        record.detail = ''
+        if (record.layer !== undefined && record.layer !== null) {
+          try {
+            if (record.layer.parentNode !== null && record.layer.parentNode !== undefined) {
+              record.layer.parentNode.removeChild(record.layer)
+            }
+          } catch (error) {
+            void error
+          }
+          record.layer = undefined
+        }
+      }
+      notify()
     }
 
     /** @param {'main' | 'right'} seat @returns {boolean} */
@@ -1980,7 +2369,9 @@ let activeCtx = undefined
         const zeroSized = hostArea(host) <= 0
         if (!zeroSized || (chosen && seat === 'main')) return seat
       }
-      return hidden
+      // A collapsed right tab stays mounted at 0×0. Treating it as the seat
+      // stows the page and never gives the column a chance to open.
+      return hidden !== undefined && hostArea(inlineHosts[hidden]) > 0 ? hidden : undefined
     }
 
     /**
@@ -2015,9 +2406,20 @@ let activeCtx = undefined
 
     function openRightTab() {
       try {
-        openRightTabImpl()
+        // The right column belongs to the conversation. A global panel (this
+        // chat page included) unmounts that surface, and openTab then throws
+        // "no session surface" — the click looks like the sidebar will not open.
+        const layout = activeCtx !== undefined && typeof activeCtx.get === 'function' ? activeCtx.get('layout') : undefined
+        if (layout !== undefined && layout !== null && typeof layout.selectPanel === 'function') {
+          layout.selectPanel(null)
+        }
       } catch (error) {
         void error
+      }
+      try {
+        openRightTabImpl()
+      } catch (error) {
+        log('warn', 'right sidebar did not open', { detail: messageOf(error) })
       }
     }
 
@@ -2057,12 +2459,13 @@ let activeCtx = undefined
         host: rect(host === undefined || host === null ? undefined : host.getBoundingClientRect()),
         visible: true,
         guest: (() => {
-          if (host === undefined || host === null || typeof host.querySelectorAll !== 'function') {
-            return { present: false, reason: 'no inline host' }
+          const probe = parkIsLive() === true ? parkNode : host
+          if (probe === undefined || probe === null || typeof probe.querySelectorAll !== 'function') {
+            return { present: false, reason: parkIsLive() === true ? 'park has no query' : 'no inline host' }
           }
-          const webviews = host.querySelectorAll('webview')
-          const layers = host.querySelectorAll('.dce-guest-layer')
-          const active = host.querySelectorAll('.dce-guest-layer[data-active="true"]')
+          const webviews = probe.querySelectorAll('webview')
+          const layers = probe.querySelectorAll('.dce-guest-layer')
+          const active = probe.querySelectorAll('.dce-guest-layer[data-active="true"]')
           const inner = document.querySelector('.dce-inline')
           return {
             present: webviews.length > 0,
@@ -2070,7 +2473,11 @@ let activeCtx = undefined
             layers: layers.length,
             active: active.length,
             surfaceMounted: inner !== null && inner !== undefined,
-            hostBox: rect(host.getBoundingClientRect()),
+            hostBox: rect(
+              host === undefined || host === null || typeof host.getBoundingClientRect !== 'function'
+                ? undefined
+                : host.getBoundingClientRect(),
+            ),
           }
         })(),
         right: rightSidebarStatus(),
@@ -2498,9 +2905,8 @@ let activeCtx = undefined
 
     /** @returns {'on' | 'off' | 'unknown'} what the mounted guests actually received */
     function livePartitionState() {
-      for (const provider of PROVIDERS) {
-        const record = guests.get(provider.id)
-        if (record === undefined || typeof record.partition !== 'string' || record.partition === '') continue
+      for (const record of guests.values()) {
+        if (typeof record.partition !== 'string' || record.partition === '') continue
         return record.partition.startsWith('persist:') ? 'on' : 'off'
       }
       return 'unknown'
@@ -2911,18 +3317,19 @@ let activeCtx = undefined
      *
      * @returns {Promise<void>}
      */
-    function ensureActiveGuest() {
-      const provider = activeProvider()
-      const record = guestRecord(provider.id)
+    function ensureActiveGuest(seat) {
+      const which = seatOf(seat)
+      const provider = activeProvider(which)
+      const record = guestRecord(provider.id, which)
       // A guest whose element was detached with its seat is gone (Electron drops
       // the WebContents with the DOM), so a live element is the only reason to
       // skip the rebuild.
       const element = record.element
       if (element !== undefined && element !== null && element.isConnected !== false) return Promise.resolve()
       if (record.mounting === true) return Promise.resolve()
-      // The host viewport inside the panel's layout is the only requirement.
-      if (state.surface.host === null || state.surface.host === undefined) return Promise.resolve()
-      return mountGuest(provider.id)
+      const home = guestHome(which)
+      if (home === null || home === undefined) return Promise.resolve()
+      return mountGuest(provider.id, which)
     }
 
     /**
@@ -2932,17 +3339,17 @@ let activeCtx = undefined
      * @param {string} id
      * @returns {Promise<void>}
      */
-    function setActive(id) {
+    function setActive(id, seat) {
+      const which = seatOf(seat)
       const provider = findProvider(id)
       if (provider === undefined) return Promise.resolve()
       if (!isEnabled(provider.id)) return Promise.resolve()
-      if (state.active !== provider.id) {
-        state.active = provider.id
-        storeActive(provider.id)
-        syncLayers()
+      if (activeBySeat[which] !== provider.id) {
+        assignSeatActive(which, provider.id)
+        syncLayers(which)
       }
       notify()
-      return ensureActiveGuest()
+      return ensureActiveGuest(which)
     }
 
     // ------------------------------------------------------------------
@@ -2998,6 +3405,19 @@ let activeCtx = undefined
       '.dce-button-primary{border-color:currentColor;color:var(--dsw-alias-button-primary-fill,#4c6ef5)}',
       '.dce-surface{position:absolute;inset:0;display:flex;min-height:0}',
       '.dce-viewport{position:absolute;inset:0;display:flex;min-width:0;min-height:0}',
+      // The park outlives the panel. Anchor paints it over the seat that is
+      // showing; `hidden` keeps the webview in the document. Chrome stays in
+      // the seat (z-index 2) and the page area does not eat pointer events, so
+      // the webview under it still receives them.
+      '.dce-park{position:fixed;z-index:1;display:flex;min-width:0;min-height:0;overflow:hidden;pointer-events:auto;background:var(--dsw-alias-bg-base,#fff)}',
+      '.dce-park[hidden]{display:none !important}',
+      '.dce-park[data-mode="main"]{border-radius:var(--dsh-windows-content-radius,0) 0 0 0}',
+      '.dce-park[data-mode="main"],.dce-park[data-mode="right"]{position:fixed;position-anchor:--dce-guest-seat;top:anchor(top);left:anchor(left);width:anchor(width);height:anchor(height);margin:0}',
+      '.dce-viewport[data-dce-anchor="true"]{anchor-name:--dce-guest-seat}',
+      '.dce-inline[data-parked="true"]{background:transparent;z-index:2;pointer-events:none}',
+      '.dce-inline[data-parked="true"]>.dce-panel{background:transparent}',
+      '.dce-inline[data-parked="true"] .dce-surface,.dce-inline[data-parked="true"] .dce-viewport{pointer-events:none;background:transparent}',
+      '.dce-inline[data-parked="true"] .dce-hotzone,.dce-inline[data-parked="true"] .dce-tabs,.dce-inline[data-parked="true"] .dce-status-bar,.dce-inline[data-parked="true"] .dce-menu,.dce-inline[data-parked="true"] .dce-menu-scrim,.dce-inline[data-parked="true"] .dce-card,.dce-inline[data-parked="true"] .dce-confirm-scrim{pointer-events:auto}',
       '.dce-guest-layer{position:absolute;inset:0;display:none;min-width:0;min-height:0}',
       '.dce-guest-layer[data-active="true"]{display:flex}',
       '.dce-guest{display:inline-flex;flex:1 1 auto;width:100%;height:100%;border:0;background:transparent}',
@@ -3098,8 +3518,9 @@ let activeCtx = undefined
      * @param {(key: string) => string} t
      * @param {{ phase: string, detail: string }} snapshot
      * @param {() => void} [onRetry]
+     * @param {string} [url]
      */
-    function hintCard(title, body, t, snapshot, onRetry) {
+    function hintCard(title, body, t, snapshot, onRetry, url) {
       return h(
         'div',
         { className: 'dce-card', role: 'status' },
@@ -3112,15 +3533,16 @@ let activeCtx = undefined
           onRetry === undefined
             ? null
             : h('button', { type: 'button', className: 'dce-button dce-button-primary', onClick: onRetry }, t('retry')),
-          h('button', { type: 'button', className: 'dce-button', onClick: openInBrowser }, t('openInBrowser')),
+          h('button', { type: 'button', className: 'dce-button', onClick: () => openInBrowser(url) }, t('openInBrowser')),
         ),
       )
     }
 
     /** Open the active service in the system browser. */
-    function openInBrowser() {
+    function openInBrowser(url) {
+      const target = typeof url === 'string' && url !== '' ? url : activeProvider().url
       try {
-        window.open(activeProvider().url, '_blank', 'noopener,noreferrer')
+        window.open(target, '_blank', 'noopener,noreferrer')
       } catch (error) {
         void error
       }
@@ -3247,9 +3669,9 @@ let activeCtx = undefined
     /**
      * The left-navigation page: the chat itself, hosted by the center panel.
      *
-     * The center panel is torn down whenever another panel is selected, so this
-     * seat is suitable while the user keeps the chat open; the right tab (below)
-     * is the seat that survives panel switches.
+     * The center panel is torn down whenever another panel is selected. The
+     * guests do not live in this component — they live in the park — so coming
+     * back shows the same page instead of navigating again.
      */
     function ChatCenterPage() {
       return h(ChatSurface, { seat: 'main' })
@@ -3258,8 +3680,8 @@ let activeCtx = undefined
     /** The right sidebar tab's chip title. */
     function ChatRightTitle() {
       useStore()
-      const provider = activeProvider()
-      const phase = getStatus().phase
+      const provider = activeProvider('right')
+      const phase = getStatus('right').phase
       return h(
         'span',
         { className: 'dce-right-title' },
@@ -3293,9 +3715,10 @@ let activeCtx = undefined
     function ChatSurface(props) {
       const t = translator(props)
       useStore()
-      const snapshot = getStatus()
+      const seatName = props !== undefined && props !== null && props.seat === 'right' ? 'right' : 'main'
+      const snapshot = getStatus(seatName)
 
-      const provider = activeProvider()
+      const provider = activeProvider(seatName)
       const hostRef = React.useRef(null)
       const listRef = React.useRef(null)
       /** @type {React.MutableRefObject<{ id: string, startX: number, active: boolean } | undefined>} */
@@ -3306,61 +3729,41 @@ let activeCtx = undefined
       const [, bumpDrag] = React.useState(0)
       const repaintDrag = () => bumpDrag((value) => value + 1)
 
-      const seatName = props !== undefined && props !== null && props.seat === 'right' ? 'right' : 'main'
-
-      // Mounting a seat is the user opening the chat there: only one of the two
-      // seats can exist at a time (the right sidebar needs a Session surface),
-      // so the seat that just rendered is the one that owns the guests.
+      // Each seat hosts its own page. Registering the viewport must not hand
+      // the other seat's webview across, and a closed right column must not
+      // paint anything onto the conversation.
       useMountEffect(() => {
-        const visible = seatName === 'main' || props.active !== false
-        if (visible) preferSeat(seatName)
-        return undefined
-      }, [])
-
-      // `preferredSeat === seatName` must count as hosting even before this seat
-      // is registered: the registration effect only runs once the viewport is
-      // committed, so requiring a registered host first would deadlock.
-      const hostingSeat = inlineSeat()
-      const hosting =
-        hostingSeat === undefined ||
-        hostingSeat === seatName ||
-        preferredSeat === seatName ||
-        // A selected right tab is a user request too: it must render its
-        // viewport so it can register and take the guests over.
-        (seatName === 'right' && props.active === true)
-      React.useEffect(() => {
         const node = hostRef.current
-        if (hosting !== true || node === null || node === undefined) return undefined
+        if (node === null || node === undefined) return undefined
         inlineHosts[seatName] = node
-        if (preferredSeat === undefined) preferredSeat = seatName
-        resolveInlineHost()
+        if (seatName === 'main') {
+          resolveInlineHost()
+        } else if (hostArea(node) >= 2 && props.active !== false) {
+          void ensureActiveGuest('right')
+        }
         notify()
-        // A collapsed right tab is 0×0 and must not steal the page; when the user
-        // expands the column the tab gets a box, and that is the moment to hand
-        // the guests over. The observer only re-runs the seat choice.
         let ro
-        if (typeof ResizeObserver === 'function' && preferredSeat === seatName) {
+        if (typeof ResizeObserver === 'function') {
           ro = new ResizeObserver(() => {
-            if (preferredSeat === seatName) resolveInlineHost()
+            if (seatName === 'main') {
+              resolveInlineHost()
+              return
+            }
+            if (props.active === false || hostArea(node) < 2) return
+            void ensureActiveGuest('right')
           })
           ro.observe(node)
         }
         return () => {
           if (ro !== undefined) ro.disconnect()
           if (inlineHosts[seatName] === node) inlineHosts[seatName] = null
-          if (preferredSeat === seatName) preferredSeat = undefined
-          resolveInlineHost()
+          if (seatName === 'main') {
+            stowPark()
+            if (parkIsLive() !== true) destroySeat('main', 'no viewport')
+          }
           notify()
         }
-      }, [hosting])
-
-      // Selecting the right tab hands the chat to that column, so the panel the
-      // user is actually looking at is the one that shows it.
-      React.useEffect(() => {
-        if (seatName !== 'right' || props.active === false) return undefined
-        if (preferredSeat !== 'right') preferSeat('right')
-        return undefined
-      }, [props.active])
+      }, [])
 
       // Pointer-driven tab reordering. Dragging is armed on pointerdown and
       // only starts after a small threshold, so a plain click still selects.
@@ -3591,9 +3994,9 @@ let activeCtx = undefined
         })
       }
       const onReload = () => {
-        void reloadGuest(provider.id)
+        void reloadGuest(provider.id, seatName)
       }
-      const record = guestRecord(provider.id)
+      const record = guestRecord(provider.id, seatName)
 
       // The status strip only earns its space while something is happening or
       // wrong; a healthy tab shows nothing but its tabs. A pending patch is
@@ -3622,6 +4025,9 @@ let activeCtx = undefined
           'data-visible': 'true',
           'data-mode': 'inline',
           'data-seat': seatName,
+          // True on the first paint, not after an effect: otherwise the panel's
+          // own background covers the park for a frame and the page looks late.
+          'data-parked': seatName === 'main' && shellFramePresent() === true ? 'true' : 'false',
           'data-build': BUILD,
           'aria-hidden': 'false',
         },
@@ -3656,7 +4062,7 @@ let activeCtx = undefined
                     className: 'dce-tab',
                     'data-tab-id': entry.id,
                     'data-active': entry.id === provider.id ? 'true' : 'false',
-                    'data-failed': guestRecord(entry.id).phase === PHASE.FAILED ? 'true' : 'false',
+                    'data-failed': guestRecord(entry.id, seatName).phase === PHASE.FAILED ? 'true' : 'false',
                     'data-dragging':
                       dragRef.current !== undefined &&
                       dragRef.current.active === true &&
@@ -3675,7 +4081,7 @@ let activeCtx = undefined
                         suppressClickRef.current = false
                         return
                       }
-                      void setActive(entry.id)
+                      void setActive(entry.id, seatName)
                     },
                   },
                   entry.label,
@@ -4037,10 +4443,10 @@ let activeCtx = undefined
             { className: 'dce-surface' },
             h('div', { className: 'dce-viewport', ref: hostRef }),
             snapshot.phase === PHASE.UNSUPPORTED
-              ? hintCard(t('statusUnsupported'), t('unsupportedHint'), t, snapshot)
+              ? hintCard(t('statusUnsupported'), t('unsupportedHint'), t, snapshot, undefined, provider.url)
               : null,
             snapshot.phase === PHASE.FAILED
-              ? hintCard(t('statusFailed'), t('failedHint'), t, snapshot, onReload)
+              ? hintCard(t('statusFailed'), t('failedHint'), t, snapshot, onReload, provider.url)
               : null,
             record.oauthBlocked
               ? h(

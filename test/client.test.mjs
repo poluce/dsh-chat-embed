@@ -788,6 +788,113 @@ test('the surface paints no absolute geometry: CSS owns the box', async () => {
   }
 })
 
+test('switching back to the left panel reveals the same guest instead of navigating again', async () => {
+  const shell = createFakeShell()
+  const instance = await createInstance({ shell })
+  const { document } = instance
+
+  // The desktop frame: right column marker is what tells the client a park
+  // can outlive the center panel. Without it, guests stay in the seat.
+  const center = document.createElement('div')
+  const mainPanel = document.createElement('div')
+  const rightbar = document.createElement('div')
+  rightbar.setAttribute('data-rightbar-col', 'true')
+  center.appendChild(mainPanel)
+  document.body.appendChild(center)
+  document.body.appendChild(rightbar)
+
+  const viewport = document.createElement('div')
+  viewport.className = 'dce-viewport'
+  viewport.rect = { left: 0, top: 40, width: 1200, height: 760 }
+  document.body.appendChild(viewport)
+  instance.internals.inlineHosts.main = viewport
+  instance.internals.preferSeat('main')
+
+  const record = await openTab(instance, 'deepseek')
+  const first = record.element
+  const park = first.parentNode.parentNode
+
+  assert.equal(park.getAttribute('data-dce-park'), 'true', 'the guest lives in the park, not the seat')
+  assert.equal(first.isConnected, true)
+  assert.equal(shell.calls.acquire.length, 1)
+  assert.equal(park.getAttribute('hidden'), null, 'a visible seat shows the park')
+
+  // The center panel unmounted. This used to destroy the webview.
+  instance.internals.inlineHosts.main = null
+  instance.internals.resolveInlineHost()
+
+  assert.equal(guestOf(instance, 'deepseek').element, first, 'leaving the panel must not build a new guest')
+  assert.equal(first.isConnected, true, 'a hidden park keeps the webview in the document')
+  assert.equal(park.getAttribute('hidden'), '', 'the park is hidden, not removed')
+  assert.equal(shell.calls.acquire.length, 1, 'no new lease, so no 「正在打开」')
+
+  instance.internals.inlineHosts.main = viewport
+  instance.internals.preferSeat('main')
+  await instance.internals.ensureActiveGuest()
+
+  assert.equal(guestOf(instance, 'deepseek').element, first, 'coming back reveals the same page')
+  assert.equal(shell.calls.acquire.length, 1)
+  assert.equal(park.getAttribute('hidden'), null)
+})
+
+test('the two seats keep independent pages and the same partition', async () => {
+  const partitions = new Map()
+  let issued = 0
+  const shell = createFakeShell({
+    acquire(workspace) {
+      issued += 1
+      let partition = partitions.get(workspace)
+      if (partition === undefined) {
+        partition = 'persist:' + workspace
+        partitions.set(workspace, partition)
+      }
+      return { lease: 'lease-' + issued, partition }
+    },
+  })
+  const instance = await createInstance({ shell })
+  const { document } = instance
+
+  const rightbar = document.createElement('div')
+  rightbar.setAttribute('data-rightbar-col', 'true')
+  document.body.appendChild(rightbar)
+
+  const main = document.createElement('div')
+  main.className = 'dce-viewport'
+  main.rect = { left: 80, top: 40, width: 800, height: 760 }
+  const right = document.createElement('div')
+  right.className = 'dce-viewport'
+  right.rect = { left: 900, top: 40, width: 420, height: 760 }
+  document.body.appendChild(main)
+  document.body.appendChild(right)
+  instance.internals.inlineHosts.main = main
+  instance.internals.inlineHosts.right = right
+  instance.internals.preferSeat('main')
+
+  const left = await openTab(instance, 'deepseek')
+  await instance.internals.ensureActiveGuest('right')
+  const rightRecord = instance.internals.guestRecord('deepseek', 'right')
+
+  assert.notEqual(rightRecord.element, left.element, 'each seat has its own page')
+  assert.equal(right.contains(rightRecord.element), true, 'the right page lives in the column')
+  assert.equal(left.element.getAttribute('partition'), rightRecord.element.getAttribute('partition'), 'login is the shared partition')
+  assert.equal(shell.calls.acquire.length, 2)
+
+  right.rect = { left: 0, top: 0, width: 0, height: 0 }
+  instance.internals.inlineHosts.main = null
+  instance.internals.resolveInlineHost()
+  const park = [...document.body.walk()].find((node) => node.getAttribute && node.getAttribute('data-dce-park') === 'true')
+  assert.equal(park.getAttribute('hidden'), '', 'leaving the chat panel hides the left page')
+  assert.equal(park.style.cssText.includes('width:0'), true, 'a hidden left page must not cover the conversation')
+  assert.equal(right.contains(rightRecord.element), true, 'collapsing does not move the right page onto the conversation')
+  assert.equal(left.element, instance.internals.guestRecord('deepseek', 'main').element)
+
+  instance.internals.inlineHosts.main = main
+  instance.internals.preferSeat('main')
+  await instance.internals.ensureActiveGuest('main')
+  assert.equal(instance.internals.guestRecord('deepseek', 'main').element, left.element, 'coming back does not open the left page again')
+  assert.equal(shell.calls.acquire.length, 2)
+})
+
 test('a guest whose seat unmounted is rebuilt on the next ensure, not reused', async () => {
   const shell = createFakeShell()
   const instance = await createInstance({ shell })
@@ -861,7 +968,7 @@ test('a preferred but not yet registered seat still renders its viewport', async
   assert.ok(viewport !== undefined, 'the preferred seat renders its viewport so it can register as host')
 })
 
-test('the seat the user opens is the one that hosts the chat', async () => {
+test('opening one seat does not take the other seat page', async () => {
   const { internals, document } = await createInstance()
 
   const right = document.createElement('div')
@@ -872,21 +979,14 @@ test('the seat the user opens is the one that hosts the chat', async () => {
   internals.inlineHosts.main = center
 
   internals.preferSeat('main')
-  assert.equal(internals.inlineSeat(), 'main', 'the left entry shows the chat in the center panel')
-  assert.equal(internals.getSurface().host, center)
-  assert.equal(internals.hostsInline('main'), true)
-  assert.equal(internals.hostsInline('right'), false)
+  assert.equal(internals.getSurface().host, center, 'the left panel hosts its own page')
 
   internals.preferSeat('right')
-  assert.equal(internals.inlineSeat(), 'right', 'selecting the right tab moves the chat there')
-  assert.equal(internals.getSurface().host, right)
-
-  internals.inlineHosts.right = null
-  internals.preferSeat('main')
-  assert.equal(internals.inlineSeat(), 'main')
+  assert.equal(internals.getSurface().host, center, 'the right column does not steal the left host')
+  assert.notEqual(internals.inlineHosts.right, null)
 })
 
-test('the right sidebar tab body wins the guest host over the center page', async () => {
+test('closing the right column does not move the left page', async () => {
   const { internals, document } = await createInstance()
 
   const right = document.createElement('div')
@@ -896,21 +996,14 @@ test('the right sidebar tab body wins the guest host over the center page', asyn
 
   internals.inlineHosts.right = right
   internals.inlineHosts.main = center
-
-  assert.equal(internals.resolveInlineHost(), right, 'the persistent right tab hosts the guests')
-  assert.equal(internals.getSurface().host, right)
-  assert.equal(internals.inlineSeat(), 'right')
-  assert.equal(internals.hostsInline('right'), true)
-  assert.equal(internals.hostsInline('main'), false)
+  assert.equal(internals.resolveInlineHost(), center, 'a visible left panel keeps its own host')
 
   internals.inlineHosts.right = null
-  assert.equal(internals.resolveInlineHost(), center, 'the center page takes over when the tab closes')
-  assert.equal(internals.inlineSeat(), 'main')
+  assert.equal(internals.resolveInlineHost(), center, 'closing the right column leaves the left page where it is')
 
   internals.inlineHosts.main = null
   assert.equal(internals.resolveInlineHost(), null)
-  assert.equal(internals.getSurface().host, null, 'no host means no guest surface')
-  assert.equal(internals.inlineSeat(), undefined)
+  assert.equal(internals.getSurface().host, null, 'no left panel means the left page is hidden')
 })
 
 test('apply registers the right sidebar tab, its chip title, and a header control', async () => {
@@ -1229,14 +1322,15 @@ test('the start URL prefers the conversation a service was last on', async () =>
   const provider = internals.findProvider('deepseek')
   assert.equal(internals.startUrlFor(provider), provider.url, 'cold start opens the service home')
 
-  internals.lastUrls.set('deepseek', 'https://chat.deepseek.com/a/chat/s/abc123')
-  assert.equal(internals.startUrlFor(provider), 'https://chat.deepseek.com/a/chat/s/abc123')
+  internals.lastUrls.set('main:deepseek', 'https://chat.deepseek.com/a/chat/s/abc123')
+  assert.equal(internals.startUrlFor(provider, 'main'), 'https://chat.deepseek.com/a/chat/s/abc123')
+  assert.equal(internals.startUrlFor(provider, 'right'), provider.url, 'the other seat does not inherit the conversation')
 
-  internals.lastUrls.set('deepseek', 'https://accounts.google.com/signin/oauth/consent')
-  assert.equal(internals.startUrlFor(provider), provider.url, 'a foreign origin never becomes the start URL')
+  internals.lastUrls.set('main:deepseek', 'https://accounts.google.com/signin/oauth/consent')
+  assert.equal(internals.startUrlFor(provider, 'main'), provider.url, 'a foreign origin never becomes the start URL')
 
-  internals.lastUrls.set('deepseek', 'about:blank')
-  assert.equal(internals.startUrlFor(provider), provider.url, 'a non-live URL is ignored')
+  internals.lastUrls.set('main:deepseek', 'about:blank')
+  assert.equal(internals.startUrlFor(provider, 'main'), provider.url, 'a non-live URL is ignored')
 })
 
 test('a rebuilt guest reopens the conversation it was last on', async () => {
