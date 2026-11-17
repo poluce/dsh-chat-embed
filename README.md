@@ -380,6 +380,7 @@ node scripts/release.mjs 0.6.7 --summary "..." --dry-run   # 只看计划
 
 | 版本 | 变化 |
 | --- | --- |
+| `0.6.15` | 左右各一份页面，登录共用分区：左栏切走只隐藏，右栏页面住在列里，收起不再盖到会话上。 |
 | `0.6.14` | 「重启保持登录」在 Windows 上由计划任务启动并最多等 12 小时；设置菜单显示缓存大小，开启时只清缓存，关闭时确认后只删除本面板 7 个分区的残留登录。 |
 | `0.6.13` | 「重启保持登录」开关直接执行：Host 新增 `GET /dsh-chat-embed/patch`（探针发的 token 鉴权）启动补丁脚本，脚本用 `--restart` 等 DSH 退出、替换 `app.asar`、再自动打开 DSH；确认框降级为「自动执行不可用时」的兜底。脚本与 Host 读取 `app.asar` 一律走 `original-fs`——Electron 的 `node:fs` 会把 `.asar` 当压缩包（读出 ENOENT、`stat` 归零、写入报 Invalid package），此前探针在桌面版里会误报「没有安装目录」 |
 | `0.6.12` | 修掉同一页面每次挂载加载两三次的问题：navigateGuest 每 350ms 重发 location.href，而 getURL() 在提交前一直是 about:blank，第二次赋值取消了正在进行的加载；改为加载中只等不重发，上限从 5 次尝试改为 20 秒期限（慢站点以前会直接判定失败）。另加 guest mounted / guest dropped 诊断日志 |
