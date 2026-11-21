@@ -134,7 +134,7 @@ export class FakeNode {
 }
 
 /**
- * @param {{ webview?: { autoNavigate?: boolean, landingUrl?: string } }} [options]
+ * @param {{ webview?: { autoNavigate?: boolean, landingUrl?: string, evaluate?: Function } }} [options]
  */
 export function createFakeDocument(options = {}) {
   const webviewOptions = options.webview === undefined ? {} : options.webview
@@ -156,6 +156,9 @@ export function createFakeDocument(options = {}) {
         node.isLoading = () => node.loading
         node.executeJavaScript = (code) => {
           node.executed.push(code)
+          if (typeof webviewOptions.evaluate === 'function') {
+            return Promise.resolve(webviewOptions.evaluate(code, node))
+          }
           if (webviewOptions.autoNavigate !== false) {
             node.url = webviewOptions.landingUrl === undefined ? 'https://landing.test/' : webviewOptions.landingUrl
           }

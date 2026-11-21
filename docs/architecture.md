@@ -434,3 +434,30 @@ Host 半侧另有两条专门回答"为什么重启后要重新登录"的通道�
 | 服务列表可配置 | 把 `PROVIDERS` 迁到 Host `Config`，客户端读 ctx 配置 | 未做（现在改代码 + 重跑门禁） |
 | 内存策略 | 记录最后使用时间，LRU 回收长时间未用的 guest，切回重建 | 未做 |
 | 模态让位 | 检测 `role="dialog"[aria-modal]` 时临时隐藏聊天页 | 未做（Electron 下 DOM 弹窗本就压得住 webview） |
+
+---
+
+## 15. 导入主对话（import）
+
+把内嵌页里的问答送进 DSH 主对话输入框，**只填草稿、不自动发送**：网页内容进 agent 之前必须由用户自己按回车。
+
+两个入口、两条通道、一个适配器层：
+
+| 部件 | 位置 | 契约 |
+| --- | --- | --- |
+| 工具栏导入按钮 + 菜单 | `ChatSurface` 的 `.dce-tab-actions`（第四个图标按钮） | 菜单三项：最后一轮 / 整段对话 / 选中文本；guest 未 READY 或无适配器时禁用 |
+| 选中气泡 | guest 文档 body 级节点（React root 之外，站点重渲染扫不掉） | 设置菜单「选中气泡」开关，`IMPORT_BUBBLE_KEY` 记忆；mousedown 取消默认以保住选区 |
+| pull 通道 | `runImport` → `element.executeJavaScript(extractionSource(...))` | 返回值直接带回 payload，无常驻注入、无 console 通道 |
+| push 通道 | guest `console.log(IMPORT_PREFIX + nonce + JSON)` → webview `console-message`；备用：气泡同时 `window.open('https://dsh-chat-embed.invalid/import#nonce&text')`，壳拒绝窗口并经 `onOpenRequested` 中继（OAuth 同一条通道） | 壳在 `will-attach-webview` 删光 preload 等偏好（sandbox guest），`ipc-message` 不存在；console 是唯一幸存的 guest→embedder 事件，popup 中继独立于它。两条通道都发，`receivePush` 1.5s 内按文本去重。nonce 每次 mount 重生，旧文档喂不进当前 mount；选区在**气泡出现时**捕获（站点 mousedown 会清选区，点击时再读会是空的） |
+| 适配器层 | `GUEST_ADAPTERS[providerId].extract.{conversation,lastRound,selection}` | 函数经 `toString()` 序列化进 guest，必须自包含（仅依赖 `guestPrelude` 发布的 `dceText/dceMd/dceUserBefore`）；加站点 = 加一条条目，管线不动。已接入：DeepSeek（`.ds-markdown` + 结构化用户回合定位）、ChatGPT（`[data-message-author-role]` + `.markdown`，公开长期属性）、Gemini（`user-query`/`model-response` 自定义元素 + `.model-response-text`/`message-content`，问题定位走 3×3 邻域搜索不假设固定布局）；选区提取三站点共用同一函数，避免漂移 |
+| 导入管线 | `validateImportPayload` → `formatImport` → `mainSessionId` → `importDraft` | 主会话判据：`uiSession.adapter.current` 快照优先，`retainedBy.mainView > 0` 扫描兜底（同 `UiSession.publishMain`）；`insertQuote` 优先，被拒时 `requestDraftInitialization(..., 'append')`，不覆盖正在输入的内容 |
+
+设计边界：
+
+- `sessions` / `uiSession` / `uiWorkspace` / `conversation` 都在 `inject` 里声明（均为 client 核心 bundle 的服务，所有桌面 profile 都有）：cordis 拒绝访问未声明的服务属性，而且**派生作用域不继承插件的 inject**——`sessions.scope(id)` 返回的上下文上访问 `actx.conversation` 会抛 `cannot get property "conversation" without inject`。正确姿势：从**插件自己的 ctx** 取 `ctx.conversation.input`，把保留作用域传给 `for(actx)`；导入失败只发通知，不拖垮面板。
+- DeepSeek 类名是哈希的，`.ds-markdown` 是稳定公开类；用户回合靠 `dceUserBefore` 结构化定位（向上五层找携带文本且不含回答 markdown 的前兄弟子树），不猜哈希类名。站点改版时提取返回 `ok:false`，面板提示「没有可导入的内容」，**不会导入错误内容**；同时 `dceCensus`（候选选择器计数 + main 子节点类名采样）写进 `record.lastEvent`，随诊断卡一键复制，供重新适配选择器。
+- 提取在 guest 主世界执行：恶意页面理论上可伪造 console 前缀（nonce 只防旧文档误喂，不防恶意）。自用场景接受；这也是默认草稿而非直发的原因之一。
+- 公式：渲染后的数学节点在 `selection.toString()` 里只剩字形。选区提取先 `cloneContents()` 再序列化，遇到 KaTeX/MathJax 的数学节点就从 `annotation[encoding="application/x-tex"]`（或 `script[type="math/tex"]`、`data-tex`）取回 TeX，按行内 `$…$` / 块级 `$$…$$` 重建；只有真的重建出 `$` 时才用 markdown 结果，否则保持原来的纯文本，普通选区不受影响。census 同时统计 `.katex` / `math` 节点数，便于诊断。
+- 气泡与提取源码里不许出现 `setInterval`（门禁扫全文，含字符串）。
+
+测试：`test/import.test.mjs`（pull/push/nonce/偏好/草稿回退/通知渲染）；`fake-env.mjs` 的 webview 替身新增 `evaluate(code, node)` 钩子模拟 guest 内执行。工具栏按钮契约由 3 个改为 4 个，`client.test.mjs` 同步更新。

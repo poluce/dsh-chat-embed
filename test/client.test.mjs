@@ -176,7 +176,7 @@ test('the bundle registers exactly one factory under the package name', async ()
 
 test('the plugin record injects the client services it consumes', async () => {
   const { plugin } = await createInstance()
-  assert.deepEqual(plugin.inject, ['slots', 'locale'])
+  assert.deepEqual(plugin.inject, ['slots', 'locale', 'sessions', 'uiSession', 'uiWorkspace', 'conversation'])
   assert.equal(typeof plugin.apply, 'function')
 })
 
@@ -1466,7 +1466,7 @@ test('the log probe toggles, reads and clears the buffer', async () => {
   }
 })
 
-test('the toolbar keeps only reload, open-in-browser and settings', async () => {
+test('the toolbar keeps reload, open-in-browser, import and settings', async () => {
   const { internals } = await createInstance()
 
   const collect = (node, predicate, out = []) => {
@@ -1479,7 +1479,7 @@ test('the toolbar keeps only reload, open-in-browser and settings', async () => 
 
   const tree = internals.ChatSurface({ seat: 'main' })
   const toolbar = collect(tree, (props) => props.className === 'dce-icon-button')
-  assert.equal(toolbar.length, 3, 'reload + open-in-browser + settings only')
+  assert.equal(toolbar.length, 4, 'reload + open-in-browser + import + settings only')
   assert.equal(collect(tree, (props) => props['data-log-toggle'] === 'true').length, 0, 'the log switch moved into the menu')
   assert.equal(collect(tree, (props) => props['aria-label'] === 'Tab diagnostics').length, 0, 'the diagnostics entry moved into the menu')
 })
