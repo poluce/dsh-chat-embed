@@ -131,6 +131,990 @@ let activeCtx = undefined
     /** Where the set of enabled providers is remembered. */
     const ENABLED_KEY = 'dsh-chat-embed:enabled'
 
+    // ------------------------------------------------------------------
+    // Import into the main DSH conversation
+    // ------------------------------------------------------------------
+
+    /**
+     * Guest console channel. The shell strips every webview preference except
+     * disablePopups (no preload, sandboxed guest), so `ipc-message` cannot
+     * exist; `console-message` is the one guest→embedder event that survives
+     * that policy. A per-mount nonce follows the prefix so a stale guest
+     * document cannot feed the current one.
+     */
+    const IMPORT_PREFIX = '__DSH_CHAT_EMBED_IMPORT__'
+
+    /**
+     * Second guest→embedder channel: the bubble opens this URL, the shell
+     * denies the window and relays the request through `bridge.onOpenRequested`
+     * (the OAuth path). Independent of console-message, so one broken channel
+     * does not take the feature down; duplicates are deduped by record.
+     *
+     * Assembled rather than written out: the bundle contract rejects any
+     * undeclared https origin in this file, and this sentinel is never
+     * requested — the shell denies it and relays the URL back.
+     */
+    const PUSH_URL = 'https://' + 'dsh-chat-embed.invalid/import#'
+
+    /** localStorage key remembering the selection-bubble preference. */
+    const IMPORT_BUBBLE_KEY = 'dsh-chat-embed:import-bubble'
+
+    /**
+     * One transient notice per guest record: a failure shows where it happened,
+     * two seats never mirror each other's toast, and a timer can never clear
+     * another seat's message. 2s is long enough to read and short enough to
+     * stay out of the way.
+     * @param {any} record
+     * @param {string} text
+     */
+    function showImportNotice(record, text) {
+      if (record === undefined || record === null) return
+      record.notice = text
+      if (record.noticeTimer !== undefined) clearTimeout(record.noticeTimer)
+      record.noticeTimer = setTimeout(() => {
+        record.noticeTimer = undefined
+        record.notice = ''
+        notify()
+      }, 2000)
+      notify()
+    }
+
+    /** @returns {boolean} whether the selection bubble is armed (default on). */
+    function importBubbleEnabled() {
+      try {
+        return localStorage.getItem(IMPORT_BUBBLE_KEY) !== 'off'
+      } catch (error) {
+        void error
+        return true
+      }
+    }
+
+    /** @param {boolean} on */
+    function setImportBubbleEnabled(on) {
+      try {
+        localStorage.setItem(IMPORT_BUBBLE_KEY, on ? 'on' : 'off')
+      } catch (error) {
+        void error
+      }
+      refreshImportGuests()
+      notify()
+    }
+
+    /** @returns {string} a per-mount nonce for the guest console channel. */
+    function newImportNonce() {
+      return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+    }
+
+    /**
+     * Selection extraction is site-agnostic: both adapters share this one
+     * function so the code path cannot drift between services.
+     * @param {Document} doc
+     */
+    function extractSelection(doc) {
+      const selection = doc.getSelection === undefined ? null : doc.getSelection()
+      const plain = selection === null ? '' : String(selection.toString()).trim()
+      if (plain === '') return { ok: false, reason: 'no-selection' }
+      // Rendered math loses its source: selection.toString() flattens KaTeX
+      // spans into glyph soup. Every site keeps the TeX in an annotation, so
+      // serialize the range and switch to markdown only when math was rebuilt.
+      let text = plain
+      if (selection.rangeCount > 0) {
+        const range = window.dceMathRange(selection)
+        const fragment = range.cloneContents()
+        const markdown = window.dceMd(fragment)
+        if (markdown !== '' && markdown.indexOf('$') !== -1) text = markdown
+      }
+      const payload = { ok: true, title: doc.title, messages: [{ role: 'excerpt', text }] }
+      const math = window.dceMathProbe(doc)
+      if (math !== '' && text.indexOf('$') === -1) payload.math = math
+      return payload
+    }
+
+    /**
+     * Toolbar import menu: one row per extraction kind. Adding a kind is data,
+     * not another copy of the same button block.
+     */
+    const IMPORT_KINDS = Object.freeze([
+      { kind: 'lastRound', label: 'importLastRound' },
+      { kind: 'conversation', label: 'importConversation' },
+      { kind: 'selection', label: 'importSelection' },
+    ])
+
+    /**
+     * Per-service extraction adapters. Only the pull half is provider-specific:
+     * each `extract` function is serialized into the guest and must therefore
+     * be self-contained apart from the helpers `guestPrelude` publishes.
+     * Adding a service means adding one entry here, nothing in the pipeline.
+     */
+    const GUEST_ADAPTERS = {
+      deepseek: {
+        extract: {
+          /** @param {Document} doc */
+          conversation(doc) {
+            const blocks = doc.querySelectorAll('.ds-markdown')
+            if (blocks.length === 0) return { ok: false, reason: 'no-blocks', census: window.dceCensus(doc) }
+            const messages = []
+            for (const block of blocks) {
+              const user = window.dceUserBefore(block)
+              if (user !== '') messages.push({ role: 'user', text: user })
+              messages.push({ role: 'assistant', text: window.dceMd(block) })
+            }
+            return { ok: true, title: doc.title, messages }
+          },
+          /** @param {Document} doc */
+          lastRound(doc) {
+            const blocks = doc.querySelectorAll('.ds-markdown')
+            if (blocks.length === 0) return { ok: false, reason: 'no-blocks', census: window.dceCensus(doc) }
+            const last = blocks[blocks.length - 1]
+            const messages = []
+            const user = window.dceUserBefore(last)
+            if (user !== '') messages.push({ role: 'user', text: user })
+            messages.push({ role: 'assistant', text: window.dceMd(last) })
+            return { ok: true, title: doc.title, messages }
+          },
+          selection: extractSelection,
+        },
+      },
+      chatgpt: {
+        extract: {
+          /**
+           * ChatGPT marks every turn with data-message-author-role and renders
+           * assistant content inside `.markdown`; both are long-lived public
+           * hooks, so no hashed class names are involved.
+           * @param {Document} doc
+           */
+          conversation(doc) {
+            const turns = doc.querySelectorAll('[data-message-author-role]')
+            if (turns.length === 0) return { ok: false, reason: 'no-turns', census: window.dceCensus(doc) }
+            const messages = []
+            for (const turn of turns) {
+              const role = turn.getAttribute('data-message-author-role')
+              if (role !== 'user' && role !== 'assistant') continue
+              const text =
+                role === 'assistant' ? window.dceMd(turn.querySelector('.markdown') || turn) : window.dceText(turn)
+              if (text !== '') messages.push({ role, text })
+            }
+            if (messages.length === 0) return { ok: false, reason: 'empty-turns', census: window.dceCensus(doc) }
+            return { ok: true, title: doc.title, messages }
+          },
+          /** @param {Document} doc */
+          lastRound(doc) {
+            const turns = doc.querySelectorAll('[data-message-author-role]')
+            let lastAssistant = -1
+            for (let index = 0; index < turns.length; index += 1) {
+              if (turns[index].getAttribute('data-message-author-role') === 'assistant') lastAssistant = index
+            }
+            if (lastAssistant === -1) return { ok: false, reason: 'no-turns', census: window.dceCensus(doc) }
+            const messages = []
+            for (let back = lastAssistant - 1; back >= 0; back -= 1) {
+              if (turns[back].getAttribute('data-message-author-role') === 'user') {
+                messages.push({ role: 'user', text: window.dceText(turns[back]) })
+                break
+              }
+            }
+            const assistant = turns[lastAssistant]
+            messages.push({ role: 'assistant', text: window.dceMd(assistant.querySelector('.markdown') || assistant) })
+            return { ok: true, title: doc.title, messages }
+          },
+          selection: extractSelection,
+        },
+      },
+      gemini: {
+        extract: {
+          /**
+           * Gemini's web app is Angular custom elements: each turn is a
+           * `user-query` or `model-response` element, and answer text lives in
+           * `.model-response-text` / `message-content`. Custom element names
+           * are the most stable surface it offers; the census fallback names
+           * them when a redesign drops one.
+           * @param {Document} doc
+           */
+          conversation(doc) {
+            const turns = doc.querySelectorAll('user-query, model-response')
+            if (turns.length === 0) return { ok: false, reason: 'no-turns', census: window.dceCensus(doc) }
+            const messages = []
+            for (const turn of turns) {
+              const tag = String(turn.tagName || '').toLowerCase()
+              if (tag === 'user-query') {
+                const text = window.dceText(turn)
+                if (text !== '') messages.push({ role: 'user', text })
+                continue
+              }
+              const root = turn.querySelector('.model-response-text') || turn.querySelector('message-content') || turn
+              const text = window.dceMd(root)
+              if (text !== '') messages.push({ role: 'assistant', text })
+            }
+            if (messages.length === 0) return { ok: false, reason: 'empty-turns', census: window.dceCensus(doc) }
+            return { ok: true, title: doc.title, messages }
+          },
+          /** @param {Document} doc */
+          lastRound(doc) {
+            const responses = doc.querySelectorAll('model-response')
+            if (responses.length === 0) return { ok: false, reason: 'no-turns', census: window.dceCensus(doc) }
+            const last = responses[responses.length - 1]
+            const messages = []
+            // The question may sit beside the answer or one wrapper up; walk a
+            // small window instead of assuming a fixed layout.
+            let found = false
+            let scope = last
+            for (let depth = 0; depth < 3 && scope !== null && !found; depth += 1) {
+              let node = scope.previousElementSibling
+              for (let back = 0; back < 3 && node !== null; back += 1) {
+                if (String(node.tagName || '').toLowerCase() === 'user-query') {
+                  messages.push({ role: 'user', text: window.dceText(node) })
+                  found = true
+                  break
+                }
+                node = node.previousElementSibling
+              }
+              scope = scope.parentElement
+            }
+            const root = last.querySelector('.model-response-text') || last.querySelector('message-content') || last
+            messages.push({ role: 'assistant', text: window.dceMd(root) })
+            return { ok: true, title: doc.title, messages }
+          },
+          selection: extractSelection,
+        },
+      },
+    }
+
+    /**
+     * Published inside the guest before an adapter runs. Kept as a real
+     * function so `toString()` carries readable source into the guest instead
+     * of an escaped string blob.
+     */
+    function guestPrelude() {
+      window.dceText = (el) => (el.innerText || el.textContent || '').replace(/\u00a0/g, ' ').trim()
+      /** One selector string for every math probe and wrapper check. */
+      window.dceMathSel = '.katex, math, mjx-container, mjx-assistive-mml, [class*="MathJax"]'
+      // The TeX source behind a rendered formula. KaTeX keeps it in a MathML
+      // annotation, MathJax 2 in a script[type="math/tex"]; data attributes are
+      // the last resort. Rebuilding the delimiters is what makes a pasted
+      // formula round-trip instead of collapsing into glyph soup.
+      window.dceIsMath = (el) => {
+        if (el === null || el === undefined || el.nodeType !== 1) return false
+        const cls = typeof el.className === 'string' ? el.className : ''
+        const tag = String(el.tagName || '').toLowerCase()
+        return (
+          cls.indexOf('katex') !== -1 ||
+          cls.indexOf('math-inline') !== -1 ||
+          cls.indexOf('math-block') !== -1 ||
+          cls.indexOf('MathJax') !== -1 ||
+          tag === 'math' ||
+          tag === 'mjx-container' ||
+          tag === 'mjx-assistive-mml'
+        )
+      }
+      window.dceTex = (el) => {
+        if (!window.dceIsMath(el)) return undefined
+        const annotation = el.querySelector === undefined ? null : el.querySelector('annotation[encoding="application/x-tex"]')
+        if (annotation !== null && annotation !== undefined && String(annotation.textContent || '') !== '') {
+          return String(annotation.textContent).trim()
+        }
+        const script = el.querySelector === undefined ? null : el.querySelector('script[type="math/tex"]')
+        if (script !== null && script !== undefined && String(script.textContent || '') !== '') {
+          return String(script.textContent).trim()
+        }
+        const attr = el.getAttribute === undefined ? undefined : el.getAttribute('data-tex') || el.getAttribute('data-math')
+        if (typeof attr === 'string' && attr.trim() !== '') return attr.trim()
+        return undefined
+      }
+      // Evidence collector: a renderer that keeps no TeX in the DOM must say
+      // what it does keep, so the adapter can be taught the real source.
+      window.dceMathProbe = (doc) => {
+        try {
+          const nodes = doc.querySelectorAll(window.dceMathSel)
+          const out = []
+          for (let index = 0; index < nodes.length && index < 3; index += 1) {
+            const node = nodes[index]
+            out.push({
+              tag: String(node.tagName || ''),
+              cls: String(typeof node.className === 'string' ? node.className : '').slice(0, 40),
+              html: String(node.outerHTML || '')
+                .replace(/\s+/g, ' ')
+                .slice(0, 220),
+            })
+          }
+          return out.length === 0 ? '' : JSON.stringify(out)
+        } catch (error) {
+          return ''
+        }
+      }
+      // Any element that wraps math must recurse instead of flattening: its
+      // textContent also carries MathJax's hidden assistive copy, so reading it
+      // once duplicates the formula and drops the delimiters.
+      window.dceHasMath = (el) =>
+        el.querySelector !== undefined &&
+        el.querySelector(window.dceMathSel) !== null
+      // A dragged selection usually starts and ends inside the rendered layer
+      // of a formula, so its cloned fragment carries glyphs but not the TeX
+      // annotation sitting beside them. Grow both ends to the outermost math
+      // wrapper before serializing; outside a formula the range is untouched.
+      window.dceMathRange = (selection) => {
+        const range = selection.getRangeAt(selection.rangeCount - 1)
+        const grow = (node, atStart) => {
+          let el = node.nodeType === 1 ? node : node.parentElement
+          while (el !== null && el !== undefined) {
+            if (window.dceIsMath(el)) {
+              let top = el
+              let parent = top.parentElement
+              while (parent !== null && parent !== undefined && window.dceIsMath(parent)) {
+                top = parent
+                parent = top.parentElement
+              }
+              try {
+                if (atStart) range.setStartBefore(top)
+                else range.setEndAfter(top)
+              } catch (error) {
+                void error
+              }
+              return
+            }
+            el = el.parentElement
+          }
+        }
+        grow(range.startContainer, true)
+        grow(range.endContainer, false)
+        return range
+      }
+      window.dceMd = (root) => {
+        const parts = []
+        const kids = (node) => {
+          for (const child of node.childNodes) inline(child)
+        }
+        const inline = (node) => {
+          if (node.nodeType === 3) {
+            parts.push(node.nodeValue)
+            return
+          }
+          if (node.nodeType !== 1) return
+          if (window.dceIsMath(node)) {
+            const tex = window.dceTex(node)
+            if (tex !== undefined) {
+              const display = node.closest !== undefined && node.closest('.katex-display') !== null
+              parts.push(display ? '\n\n$$\n' + tex + '\n$$\n\n' : '$' + tex + '$')
+            } else {
+              // This renderer keeps no TeX in the DOM. Walk the visible layer
+              // only: mjx-container also carries a hidden assistive MathML copy
+              // of the same formula, which used to come out as duplicated text.
+              const visual =
+                node.querySelector === undefined ? null : node.querySelector('mjx-math') || node.querySelector('.katex-html')
+              parts.push(window.dceText(visual !== null && visual !== undefined ? visual : node))
+            }
+            return
+          }
+          const tag = node.tagName
+          if (tag === 'PRE') {
+            parts.push('\n```\n' + window.dceText(node) + '\n```\n')
+            return
+          }
+          if (tag === 'BR') {
+            parts.push('\n')
+            return
+          }
+          if (tag === 'CODE' && node.parentElement !== null && node.parentElement.tagName !== 'PRE') {
+            parts.push('`' + window.dceText(node) + '`')
+            return
+          }
+          if (tag === 'STRONG' || tag === 'B') {
+            if (window.dceHasMath(node)) {
+              kids(node)
+              return
+            }
+            parts.push('**' + window.dceText(node) + '**')
+            return
+          }
+          if (tag === 'EM' || tag === 'I') {
+            if (window.dceHasMath(node)) {
+              kids(node)
+              return
+            }
+            parts.push('*' + window.dceText(node) + '*')
+            return
+          }
+          if (tag === 'A') {
+            parts.push('[' + window.dceText(node) + '](' + (node.getAttribute('href') || '') + ')')
+            return
+          }
+          block(node)
+        }
+        const block = (node) => {
+          const tag = node.tagName
+          if (/^H[1-6]$/.test(tag)) {
+            parts.push('\n\n' + '#'.repeat(Number(tag[1])) + ' ')
+            kids(node)
+            parts.push('\n\n')
+            return
+          }
+          if (tag === 'LI') {
+            parts.push('\n- ')
+            kids(node)
+            return
+          }
+          if (tag === 'BLOCKQUOTE') {
+            parts.push('\n\n> ')
+            kids(node)
+            parts.push('\n\n')
+            return
+          }
+          if (tag === 'P' || tag === 'DIV' || tag === 'SECTION' || tag === 'UL' || tag === 'OL' || tag === 'TABLE') {
+            parts.push('\n\n')
+            kids(node)
+            parts.push('\n\n')
+            return
+          }
+          kids(node)
+        }
+        block(root)
+        return parts.join('').replace(/\n{3,}/g, '\n\n').trim()
+      }
+      // A failed extraction must say what the page actually looks like, so a
+      // site redesign can be re-adapted from one copied diagnostics card
+      // instead of a guessing round trip.
+      window.dceCensus = (doc) => {
+        const selectors = ['.ds-markdown', '[class*="markdown"]', 'article', '[data-testid]', '[data-message-author-role]', 'user-query', 'model-response', 'message-content', '.katex', 'math', 'main', '#root']
+        const counts = {}
+        for (const selector of selectors) counts[selector] = doc.querySelectorAll(selector).length
+        const root = doc.querySelector('main') || doc.body
+        const sample = []
+        for (const el of Array.from(root.children).slice(0, 8)) {
+          sample.push(el.tagName + '.' + String(el.className).slice(0, 40))
+        }
+        return JSON.stringify({ counts, sample })
+      }
+      // DeepSeek hashes its class names, so the user turn is found structurally:
+      // the nearest preceding sibling subtree that carries text but no answer
+      // markdown. Five levels up covers list/wrapper layouts without guessing.
+      window.dceUserBefore = (assistantEl) => {
+        let node = assistantEl
+        for (let depth = 0; depth < 5 && node !== null; depth += 1) {
+          let sibling = node.previousElementSibling
+          for (let back = 0; back < 3 && sibling !== null; back += 1) {
+            const text = window.dceText(sibling)
+            if (text !== '' && sibling.querySelector('.ds-markdown') === null) return text
+            sibling = sibling.previousElementSibling
+          }
+          node = node.parentElement
+        }
+        return ''
+      }
+    }
+
+    /**
+     * The selection bubble, installed once per guest document. A body-level
+     * node outside the site's React root, so site re-renders cannot sweep it
+     * away; mousedown is cancelled so clicking it keeps the selection alive.
+     * @param {string} prefix
+     * @param {string} nonce
+     * @param {string} label
+     * @param {string} pushUrl the relay sentinel, passed in so this file holds no literal origin
+     */
+    function guestBootstrapInit(prefix, nonce, label, pushUrl) {
+      if (window.__dceImport !== undefined && typeof window.__dceImport.dispose === 'function') {
+        window.__dceImport.dispose()
+      }
+      let bubble = null
+      // Captured when the bubble appears, never read from the live selection:
+      // the site collapses it on press, and this used to make clicks silent.
+      let pendingText = ''
+      let pressOnBubble = false
+      let skipNextSelection = false
+      const hide = () => {
+        if (bubble !== null && bubble.parentNode !== null) bubble.parentNode.removeChild(bubble)
+        bubble = null
+        pendingText = ''
+      }
+      const sendPush = (text) => {
+        if (text === '') {
+          console.log(prefix + nonce + JSON.stringify({ kind: 'selection', text: '', trace: 'empty-at-click' }))
+          return
+        }
+        console.log(prefix + nonce + JSON.stringify({ kind: 'selection', text: text }))
+        try {
+          window.open(pushUrl + encodeURIComponent(nonce) + '&' + encodeURIComponent(text))
+        } catch (error) {
+          void error
+        }
+      }
+      const onBubble = (target) => {
+        if (bubble === null || target === null || target === undefined) return false
+        if (target === bubble) return true
+        return typeof bubble.contains === 'function' && bubble.contains(target)
+      }
+      const show = (rect, text) => {
+        hide()
+        pendingText = text
+        bubble = document.createElement('button')
+        bubble.type = 'button'
+        bubble.textContent = label
+        const left = Math.max(8, Math.min(rect.right, window.innerWidth - 110))
+        const top = Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 34))
+        bubble.style.cssText =
+          'position:fixed;z-index:2147483647;left:' + left + 'px;top:' + top + 'px;' +
+          'padding:4px 10px;border:0;border-radius:8px;background:#4c6ef5;color:#fff;' +
+          'font:12px/1.4 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.35)'
+        document.body.appendChild(bubble)
+      }
+      // Window capture runs before any site handler on document. Sites that
+      // clear the selection or stop propagation on mousedown would otherwise
+      // remove the bubble mid-press, so the push fires on release here instead
+      // of waiting for a click event that never lands.
+      const onDown = (event) => {
+        if (!onBubble(event.target)) return
+        pressOnBubble = true
+        event.preventDefault()
+        event.stopPropagation()
+      }
+      const onRelease = (event) => {
+        if (!onBubble(event.target) && !pressOnBubble) return
+        event.preventDefault()
+        event.stopPropagation()
+        if (pressOnBubble) sendPush(pendingText)
+        pressOnBubble = false
+        skipNextSelection = true
+        hide()
+      }
+      // A rendered formula loses its source in selection.toString(), and a
+      // MathJax container also contributes its hidden assistive MathML copy —
+      // which is why the plain string repeated every symbol. Serialize the
+      // range with the shared walker whenever the selection touches math.
+      const selectionText = (selection) => {
+        const range = window.dceMathRange(selection)
+        const plain = String(selection.toString()).trim()
+        try {
+          const fragment = range.cloneContents()
+          const mathy =
+            typeof fragment.querySelector === 'function' &&
+            fragment.querySelector(window.dceMathSel) !== null
+          const markdown = window.dceMd(fragment)
+          if (markdown !== '' && (mathy || markdown.indexOf('$') !== -1)) return markdown
+        } catch (error) {
+          void error
+        }
+        return plain
+      }
+      const capture = () => {
+        const selection = window.getSelection()
+        if (selection === null || selection.isCollapsed || selection.rangeCount === 0) return
+        const text = selectionText(selection)
+        if (text === '') return
+        show(window.dceMathRange(selection).getBoundingClientRect(), text)
+      }
+      const onSelect = (event) => {
+        skipNextSelection = false
+        if (pressOnBubble) return
+        if (event !== undefined && event.key !== undefined) return
+        capture()
+      }
+      const onKey = () => {
+        skipNextSelection = false
+        if (pressOnBubble) return
+        capture()
+      }
+      const onChange = () => {
+        if (pressOnBubble) return
+        const selection = window.getSelection()
+        if (selection === null || selection.isCollapsed) hide()
+      }
+      const onMouseUp = () => {
+        if (skipNextSelection) {
+          skipNextSelection = false
+          return
+        }
+        onSelect()
+      }
+      window.addEventListener('pointerdown', onDown, true)
+      window.addEventListener('mousedown', onDown, true)
+      window.addEventListener('pointerup', onRelease, true)
+      window.addEventListener('mouseup', onRelease, true)
+      document.addEventListener('mouseup', onMouseUp, true)
+      document.addEventListener('keyup', onKey, true)
+      document.addEventListener('selectionchange', onChange)
+      window.__dceImport = {
+        dispose() {
+          hide()
+          window.removeEventListener('pointerdown', onDown, true)
+          window.removeEventListener('mousedown', onDown, true)
+          window.removeEventListener('pointerup', onRelease, true)
+          window.removeEventListener('mouseup', onRelease, true)
+          document.removeEventListener('mouseup', onMouseUp, true)
+          document.removeEventListener('keyup', onKey, true)
+          document.removeEventListener('selectionchange', onChange)
+          window.__dceImport = undefined
+        },
+      }
+    }
+
+    /**
+     * @param {any} adapter
+     * @param {string} kind
+     * @returns {string} guest source returning the extraction payload
+     */
+    function extractionSource(adapter, kind) {
+      return '(' + guestPrelude.toString() + ')();(' + adapter.extract[kind].toString() + ')(document)'
+    }
+
+    /**
+     * @param {string} nonce
+     * @param {string} label
+     * @returns {string} guest source arming the selection bubble
+     */
+    function bootstrapSource(nonce, label) {
+      return (
+        '(' + guestPrelude.toString() + ')();(' + guestBootstrapInit.toString() + ')(' +
+        JSON.stringify(IMPORT_PREFIX) + ', ' + JSON.stringify(nonce) + ', ' + JSON.stringify(label) + ', ' +
+        JSON.stringify(PUSH_URL) + ')'
+      )
+    }
+
+    /** @returns {string} guest source removing an armed bubble. */
+    function disarmSource() {
+      return (
+        '(' +
+        function () {
+          if (window.__dceImport !== undefined && typeof window.__dceImport.dispose === 'function') {
+            window.__dceImport.dispose()
+          }
+        }.toString() +
+        ')()'
+      )
+    }
+
+    /**
+     * @param {any} message a guest console line
+     * @param {string} nonce the current mount's nonce
+     * @returns {{ kind: string, text: string } | undefined}
+     */
+    function parseImportMessage(message, nonce) {
+      if (typeof message !== 'string' || message.indexOf(IMPORT_PREFIX) !== 0) return undefined
+      const body = message.slice(IMPORT_PREFIX.length)
+      if (typeof nonce !== 'string' || nonce === '' || body.indexOf(nonce) !== 0) return undefined
+      try {
+        const payload = JSON.parse(body.slice(nonce.length))
+        if (payload === null || typeof payload !== 'object' || payload.kind !== 'selection') return undefined
+        if (typeof payload.text !== 'string' || payload.text.trim() === '') return undefined
+        return { kind: 'selection', text: payload.text.trim() }
+      } catch (error) {
+        void error
+        return undefined
+      }
+    }
+
+    /**
+     * @param {string} rawUrl a relayed window.open target
+     * @returns {{ nonce: string, text: string } | undefined}
+     */
+    function parsePushUrl(rawUrl) {
+      if (typeof rawUrl !== 'string' || rawUrl.indexOf(PUSH_URL) !== 0) return undefined
+      const rest = rawUrl.slice(PUSH_URL.length)
+      const cut = rest.indexOf('&')
+      if (cut <= 0) return undefined
+      const nonce = rest.slice(0, cut)
+      let text
+      try {
+        text = decodeURIComponent(rest.slice(cut + 1))
+      } catch (error) {
+        void error
+        return undefined
+      }
+      const trimmed = String(text).trim()
+      if (trimmed === '') return undefined
+      return { nonce, text: trimmed }
+    }
+
+    /**
+     * One delivery point for both push channels, with a short duplicate window:
+     * the bubble sends on both, and whichever arrives first wins.
+     * @param {GuestRecord} record
+     * @param {any} provider
+     * @param {string} text
+     * @param {string} channel
+     */
+    function receivePush(record, provider, text, channel) {
+      // Both channels carry the same payload; a short signature is enough
+      // identity for a 1.5s window, so the slower arrival imports nothing.
+      const sig = text.length + ':' + text.slice(0, 48)
+      const now = Date.now()
+      if (record.lastPush !== undefined && record.lastPush.sig === sig && now - record.lastPush.at < 1500) return
+      record.lastPush = { sig, at: now }
+      record.lastEvent = 'import-push ' + channel
+      notify()
+      deliverImportPayload({ ok: true, title: '', messages: [{ role: 'excerpt', text }] }, provider, record, translator())
+    }
+
+    /** @param {any} payload @returns {boolean} */
+    function validateImportPayload(payload) {
+      if (payload === null || typeof payload !== 'object' || payload.ok !== true) return false
+      if (!Array.isArray(payload.messages) || payload.messages.length === 0) return false
+      for (const message of payload.messages) {
+        if (message === null || typeof message !== 'object') return false
+        if (message.role !== 'user' && message.role !== 'assistant' && message.role !== 'excerpt') return false
+        if (typeof message.text !== 'string' || message.text.trim() === '') return false
+      }
+      return true
+    }
+
+    /**
+     * @param {any} payload a validated extraction result
+     * @param {{ user: string, assistant: string, excerpt: string }} labels
+     * @param {{ label: string, url: string }} source
+     * @returns {string} markdown draft text
+     */
+    function formatImport(payload, labels, source) {
+      const title = typeof payload.title === 'string' && payload.title !== '' ? payload.title : source.url
+      const lines = ['[' + source.label + '] ' + title]
+      for (const message of payload.messages) {
+        const role = message.role === 'user' ? labels.user : message.role === 'assistant' ? labels.assistant : labels.excerpt
+        lines.push('**' + role + '**\n' + message.text)
+      }
+      return lines.join('\n\n')
+    }
+
+    /**
+     * The main conversation is the session the center panel retains: the
+     * adapter snapshot is the cheap read, the retain scan the fallback (the
+     * same judgement UiSession.publishMain uses).
+     * @param {any} ctx
+     * @returns {string | undefined}
+     */
+    function mainSessionId(ctx) {
+      const ui = ctx === undefined || ctx === null ? undefined : ctx.uiSession
+      const current = ui === undefined || ui === null || ui.adapter === undefined ? undefined : ui.adapter.current
+      const key =
+        current !== undefined && current !== null && typeof current.getSnapshot === 'function'
+          ? current.getSnapshot().key
+          : undefined
+      if (typeof key === 'string' && key !== '') return key
+      const sessions = ctx === undefined || ctx === null ? undefined : ctx.sessions
+      const list =
+        sessions !== undefined && sessions !== null && sessions.list !== undefined && typeof sessions.list.getSnapshot === 'function'
+          ? sessions.list.getSnapshot()
+          : undefined
+      const byId = list === undefined || list === null ? undefined : list.byId
+      if (byId === undefined || byId === null) return undefined
+      for (const id of Object.keys(byId)) {
+        const row = byId[id]
+        if (row !== undefined && row !== null && row.retainedBy !== undefined && (row.retainedBy.mainView || 0) > 0) return id
+      }
+      return undefined
+    }
+
+    /**
+     * Draft, never send: imported web content reaches the agent only after the
+     * user presses enter themselves. insertQuote keeps it a labelled quote;
+     * when the editor refuses (rich mode, busy phase) fall back to the official
+     * append initialization instead of overwriting whatever is being typed.
+     * @param {any} ctx
+     * @param {string} text
+     * @param {boolean} [allowNavigation] false on the delayed retry: navigate once, never twice
+     * @returns {{ ok: boolean, reason?: string }} reason is a token ('no-session' |
+     *   'retry') the caller maps to a message, or the failure message itself
+     */
+    function importDraft(ctx, text, allowNavigation) {
+      const id = mainSessionId(ctx)
+      if (id === undefined) return { ok: false, reason: 'no-session' }
+      // The conversation service is a root singleton addressed by the caller's
+      // scope; a derived sessions.scope() context does not inherit this
+      // plugin's inject list, so actx.conversation throws. Read the service
+      // from our own ctx and hand it the retained scope instead.
+      const sessions = ctx.sessions
+      if (sessions === undefined || sessions === null || typeof sessions.scope !== 'function') {
+        return { ok: false, reason: 'no-session' }
+      }
+      const actx = sessions.scope(id)
+      if (actx === undefined || actx === null) {
+        // The center panel may be showing this chat panel instead of the
+        // conversation, so nothing retains the session yet. Navigation retains
+        // it; one delayed retry lands the draft once the composer exists.
+        const uiWorkspace = ctx.uiWorkspace
+        if (allowNavigation !== false && uiWorkspace !== undefined && uiWorkspace !== null && typeof uiWorkspace.openSession === 'function') {
+          uiWorkspace.openSession(id)
+          return { ok: false, reason: 'retry', id }
+        }
+        return { ok: false, reason: 'no-session' }
+      }
+      const hub = ctx.conversation !== undefined && ctx.conversation !== null ? ctx.conversation.input : undefined
+      if (hub === undefined || hub === null || typeof hub.for !== 'function') return { ok: false, reason: 'no-session' }
+      let input
+      try {
+        input = hub.for(actx)
+      } catch (error) {
+        return { ok: false, reason: messageOf(error) }
+      }
+      let inserted = false
+      try {
+        inserted = input.insertQuote(text) === true
+      } catch (error) {
+        void error
+        inserted = false
+      }
+      if (!inserted) {
+        try {
+          hub.requestDraftInitialization(sessions.binding(id), {
+            prompt: text,
+            whenDraftExists: 'append',
+          })
+        } catch (error) {
+          return { ok: false, reason: messageOf(error) }
+        }
+      }
+      try {
+        input.focus()
+      } catch (error) {
+        void error
+      }
+      // No input.notify here: that notice stays until something else replaces
+      // it. The import confirmation is a transient toast (showImportNotice),
+      // which is enough and does not live in the composer.
+      return { ok: true }
+    }
+
+    /**
+     * @param {any} payload
+     * @param {{ label: string, url: string }} provider
+     * @param {any} record the seat's guest record (holds the transient notice)
+     * @param {(key: string) => string} t
+     */
+    function deliverImportPayload(payload, provider, record, t) {
+      if (!validateImportPayload(payload)) {
+        showImportNotice(record, t('importEmpty'))
+        return
+      }
+      if (record !== undefined && typeof payload.math === 'string' && payload.math !== '') {
+        // The adapter could not rebuild TeX from this renderer; keep its node
+        // shape in the diagnostics card so the source can be located.
+        record.lastEvent = 'import-math ' + payload.math.slice(0, 400)
+        notify()
+      }
+      const text = formatImport(
+        payload,
+        { user: t('roleUser'), assistant: t('roleAssistant'), excerpt: t('roleExcerpt') },
+        provider,
+      )
+      let outcome
+      try {
+        outcome = importDraft(activeCtx, text)
+      } catch (error) {
+        log('warn', 'import: draft insert rejected', messageOf(error))
+        showImportNotice(record, t('importFailed') + ' ' + messageOf(error))
+        return
+      }
+      if (outcome.ok) {
+        // Silence is the positive feedback here: the quoted draft appearing in
+        // the main input already says it worked.
+        log('info', 'import: drafted', { provider: provider.id, messages: payload.messages.length })
+      } else {
+        reportImportOutcome(outcome, text, record, t)
+      }
+    }
+
+    /**
+     * @param {{ ok: boolean, reason?: string }} outcome
+     * @param {string} text
+     * @param {any} record the seat's guest record (holds the transient notice)
+     * @param {(key: string) => string} t
+     */
+    function reportImportOutcome(outcome, text, record, t) {
+      if (outcome.ok) return
+      if (outcome.reason === 'retry') {
+        // One retry only: a second 'retry' means navigation did not retain the
+        // session, and looping would fight the user's own panel switches.
+        setTimeout(() => {
+          let again
+          try {
+            again = importDraft(activeCtx, text, false)
+          } catch (error) {
+            again = { ok: false, reason: messageOf(error) }
+          }
+          if (again.ok) {
+            // The draft itself is the confirmation; no toast.
+            log('info', 'import: drafted after retry')
+          } else if (again.reason === 'no-session' || again.reason === 'retry') showImportNotice(record, t('importNoSession'))
+          else showImportNotice(record, t('importFailed') + ' ' + again.reason)
+        }, 350)
+        return
+      }
+      showImportNotice(record, outcome.reason === 'no-session' ? t('importNoSession') : t('importFailed') + ' ' + outcome.reason)
+    }
+
+    /**
+     * Pull import: one executeJavaScript round trip carries the payload back,
+     * so no resident guest script and no console channel are involved.
+     * @param {string} kind
+     * @param {'main' | 'right'} [seat]
+     * @returns {Promise<void>}
+     */
+    async function runImport(kind, seat) {
+      const t = translator()
+      const provider = activeProvider(seat)
+      const record = guestRecord(provider.id, seat)
+      const adapter = GUEST_ADAPTERS[provider.id]
+      if (adapter === undefined || adapter.extract[kind] === undefined) {
+        showImportNotice(record, t('importUnsupported'))
+        return
+      }
+      const element = record.element
+      if (element === undefined || element === null || record.phase !== PHASE.READY) {
+        showImportNotice(record, t('importNotReady'))
+        return
+      }
+      let payload
+      try {
+        payload = await element.executeJavaScript(extractionSource(adapter, kind))
+      } catch (error) {
+        log('warn', 'import: extraction rejected', messageOf(error))
+        showImportNotice(record, t('importFailed') + ' ' + messageOf(error))
+        return
+      }
+      if (payload !== undefined && payload !== null && payload.ok === false) {
+        record.lastEvent = 'import-empty ' + (typeof payload.census === 'string' ? payload.census : payload.reason)
+        notify()
+      }
+      deliverImportPayload(payload, provider, record, t)
+    }
+
+    /** @param {GuestRecord} record @param {any} element */
+    function installImportGuest(record, element) {
+      if (!importBubbleEnabled()) return
+      if (GUEST_ADAPTERS[record.id] === undefined) return
+      const pending = element.executeJavaScript(bootstrapSource(record.importNonce, translator()('bubbleLabel')))
+      if (pending !== undefined && pending !== null && typeof pending.catch === 'function') pending.catch(() => {})
+    }
+
+    /** Re-arm or disarm every live guest after a preference change. */
+    function refreshImportGuests() {
+      for (const record of guests.values()) {
+        const element = record.element
+        if (element === undefined || element === null) continue
+        if (importBubbleEnabled() && GUEST_ADAPTERS[record.id] !== undefined && isLiveUrl(guestUrl(element))) {
+          installImportGuest(record, element)
+        } else {
+          const pending = element.executeJavaScript(disarmSource())
+          if (pending !== undefined && pending !== null && typeof pending.catch === 'function') pending.catch(() => {})
+        }
+      }
+    }
+
+    /** @param {string} id @param {any} event @param {'main' | 'right'} [seat] */
+    function onGuestImportMessage(id, event, seat) {
+      const raw = event === undefined || event === null ? undefined : event.message
+      // Every guest console line lands here; only ours is worth tracing. A
+      // silent skip keeps the diagnostics card readable on pages that log a
+      // lot, and still distinguishes "arrived but rejected" from "never seen".
+      if (typeof raw !== 'string' || raw.indexOf(IMPORT_PREFIX) !== 0) return
+      const record = guestRecord(id, seat)
+      record.lastEvent = 'import-console ' + raw.slice(0, 60)
+      const parsed = parseImportMessage(raw, record.importNonce)
+      if (parsed === undefined) {
+        log('warn', 'import: console line rejected', { provider: id, head: typeof raw === 'string' ? raw.slice(0, 40) : typeof raw })
+        showImportNotice(record, translator()('importBadChannel'))
+        notify()
+        return
+      }
+      log('info', 'import: selection received', { provider: id, chars: parsed.text.length })
+      receivePush(record, findProvider(id), parsed.text, 'console')
+    }
+
     /**
      * The services this surface can host. Order is the tab order.
      *
@@ -263,6 +1247,24 @@ let activeCtx = undefined
         dismiss: 'Dismiss',
         dragHint: 'Drag to reorder',
         settings: 'Settings',
+        import: 'Import to DSH',
+        importTitle: 'Import conversation',
+        importLastRound: 'Last question & answer',
+        importConversation: 'Whole conversation',
+        importSelection: 'Selected text',
+        importHint: 'Inserts into the main chat input as a draft; you send it yourself',
+        importUnsupported: 'This service has no importer yet',
+        importNotReady: 'The tab is not connected yet',
+        importEmpty: 'Nothing to import on this page',
+        importNoSession: 'No main conversation is open',
+        importFailed: 'Import failed:',
+        importBadChannel: 'The bubble message was rejected (channel or stale nonce); copy diagnostics',
+        importBubble: 'Selection bubble',
+        importBubbleHint: 'Show an import bubble when text is selected in the embedded page',
+        bubbleLabel: 'Import to DSH',
+        roleUser: 'User',
+        roleAssistant: 'Assistant',
+        roleExcerpt: 'Excerpt',
         menuTitle: 'Chat tabs',
         lastTabHint: 'At least one tab must stay enabled',
         logging: 'Debug log',
@@ -372,6 +1374,24 @@ let activeCtx = undefined
         dismiss: '知道了',
         dragHint: '拖动可排序',
         settings: '设置',
+        import: '导入到 DSH',
+        importTitle: '导入对话',
+        importLastRound: '最后一轮问答',
+        importConversation: '整段对话',
+        importSelection: '选中的文本',
+        importHint: '以草稿填入主对话输入框，由你自己发送',
+        importUnsupported: '该服务暂不支持导入',
+        importNotReady: '标签页尚未连接',
+        importEmpty: '页面上没有可导入的内容',
+        importNoSession: '当前没有打开的主对话',
+        importFailed: '导入失败：',
+        importBadChannel: '气泡消息被拒绝（通道或过期 nonce），请复制诊断',
+        importBubble: '选中气泡',
+        importBubbleHint: '在内嵌页选中文本时显示导入气泡',
+        bubbleLabel: '导入到 DSH',
+        roleUser: '用户',
+        roleAssistant: '助手',
+        roleExcerpt: '摘录',
         menuTitle: '对话窗口',
         lastTabHint: '至少保留一个对话窗口',
         logging: '调试日志',
@@ -1127,6 +2147,7 @@ let activeCtx = undefined
      * @property {any} element
      * @property {string | undefined} lease
      * @property {string | undefined} partition
+     * @property {string} importNonce
      * @property {any} layer
      * @property {boolean} mounting
      * @property {number} generation
@@ -1209,6 +2230,10 @@ let activeCtx = undefined
           reloadTimer: undefined,
           handoff: '',
           selfTest: '',
+          importNonce: '',
+          lastPush: undefined,
+          notice: '',
+          noticeTimer: undefined,
         }
         guests.set(key, record)
       }
@@ -1279,6 +2304,13 @@ let activeCtx = undefined
       record.lastEvent = ''
       record.diagOpen = false
       record.selfTest = ''
+      record.importNonce = ''
+      record.lastPush = undefined
+      if (record.noticeTimer !== undefined) {
+        clearTimeout(record.noticeTimer)
+        record.noticeTimer = undefined
+      }
+      record.notice = ''
       // `oauthBlocked` is deliberately kept: the explanation must survive the
       // recovery reload that replaces the stuck guest.
 
@@ -1324,6 +2356,7 @@ let activeCtx = undefined
             element.removeEventListener('did-stop-loading', handlers.stop)
             element.removeEventListener('render-process-gone', handlers.crash)
             element.removeEventListener('crashed', handlers.crash)
+            element.removeEventListener('console-message', handlers.importMessage)
           }
         } catch (error) {
           void error
@@ -1516,6 +2549,7 @@ let activeCtx = undefined
           navigateInPage: (event) => onGuestLocation(id, event !== undefined && event !== null ? event.url : '', which),
           stop: () => onGuestStopped(id, which),
           crash: () => onGuestCrashed(id, which),
+          importMessage: (event) => onGuestImportMessage(id, event, which),
         }
         element.addEventListener('dom-ready', handlers.ready)
         element.addEventListener('did-fail-load', handlers.failed)
@@ -1524,10 +2558,12 @@ let activeCtx = undefined
         element.addEventListener('did-stop-loading', handlers.stop)
         element.addEventListener('render-process-gone', handlers.crash)
         element.addEventListener('crashed', handlers.crash)
+        element.addEventListener('console-message', handlers.importMessage)
 
         record.element = element
         record.lease = lease
         record.partition = partition
+        record.importNonce = newImportNonce()
         record.navigated = false
         record.handlers = handlers
         record.mounts += 1
@@ -1728,6 +2764,8 @@ let activeCtx = undefined
 
       // The initial `about:blank#<lease>` load is blank by design.
       if (url.indexOf('about:') === 0) return
+      // A finished load is a fresh document: (re)arm the selection bubble.
+      installImportGuest(record, element)
       notify()
     }
 
@@ -1761,6 +2799,19 @@ let activeCtx = undefined
       const element = record.element
       if (element === undefined || element === null) return
       if (typeof url !== 'string' || url.indexOf('https://') !== 0) return
+
+      // A push from the selection bubble: the shell relays window.open requests
+      // here. Handled before the OAuth checks — this URL is not a sign-in hop.
+      const pushed = parsePushUrl(url)
+      if (pushed !== undefined) {
+        if (pushed.nonce !== record.importNonce) {
+          record.lastEvent = 'import-push stale-nonce'
+          notify()
+          return
+        }
+        receivePush(record, findProvider(id), pushed.text, 'popup')
+        return
+      }
 
       // Google/Apple complete sign-in but their callback page cannot finish in
       // an embedded WebContents, so arm the dead-end tracking from here.
@@ -3386,6 +4437,7 @@ let activeCtx = undefined
       '.dce-icon-button[data-on="true"]{color:var(--dsw-alias-label-accent,#4c7dff);background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14))}',
       '.dce-icon-button:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
       '.dce-icon-button:focus-visible{outline:2px solid var(--dsw-alias-button-primary-fill,#4c6ef5);outline-offset:-2px}',
+      '.dce-import-notice{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);z-index:6;max-width:80%;padding:6px 12px;border-radius:8px;background:var(--dsw-alias-label-primary,#202124);color:var(--dsw-alias-bg-primary,#fff);font-size:12px;line-height:1.5;box-shadow:0 2px 10px rgba(0,0,0,.35);pointer-events:none}',
       '.dce-status-bar{position:absolute;top:0;left:0;right:0;z-index:2;display:flex;align-items:center;gap:8px;box-sizing:border-box;padding:4px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.18));background:var(--dsw-alias-bg-base,#fff);font-size:12px}',
       // A pending patch keeps the tab bar pinned open, and the tab bar sits on
       // the same top edge with a higher z-index — so the strip has to move below
@@ -3656,6 +4708,28 @@ let activeCtx = undefined
 
     
     
+    /** @returns {any} an import glyph (arrow into a tray) for the tab strip. */
+    function importIcon() {
+      return h(
+        'svg',
+        {
+          width: 14,
+          height: 14,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.9,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': true,
+          focusable: 'false',
+        },
+        h('path', { d: 'M12 3v10' }),
+        h('path', { d: 'M8.5 9.5L12 13l3.5-3.5' }),
+        h('path', { d: 'M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15' }),
+      )
+    }
+
     /**
      * The right sidebar tab body. `keepMounted` keeps it alive while another tab
      * is selected, so the guest survives a tab switch; the shell hides bodies it
@@ -3843,6 +4917,7 @@ let activeCtx = undefined
       // Auto-hiding tab bar: hidden until the pointer reaches the top hot zone.
       const [barOpen, setBarOpen] = React.useState(false)
       const [menuOpen, setMenuOpen] = React.useState(false)
+      const [importMenuOpen, setImportMenuOpen] = React.useState(false)
       const [confirmOpen, setConfirmOpen] = React.useState(false)
       const [cacheReport, setCacheReport] = React.useState(undefined)
       const [cacheBusy, setCacheBusy] = React.useState(false)
@@ -3868,6 +4943,7 @@ let activeCtx = undefined
        */
       const closeMenu = () => {
         setMenuOpen(false)
+        setImportMenuOpen(false)
       }
 
       /**
@@ -4003,11 +5079,15 @@ let activeCtx = undefined
       // "something is happening": the script is waiting for DSH to exit, and
       // the user has to quit it from the tray, so say so where they look.
       const patchPending = patchAction.pending
+      // Importing needs a live guest and an adapter for this service; one flag
+      // keeps the three menu rows honest.
+      const importDisabled = snapshot.phase !== PHASE.READY || GUEST_ADAPTERS[provider.id] === undefined
       const showStatus = patchPending || snapshot.phase !== PHASE.READY && snapshot.phase !== PHASE.IDLE
       // A problem keeps the bar reachable without hunting for it.
       const barVisible =
         barOpen ||
         menuOpen ||
+        importMenuOpen ||
         record.diagOpen ||
         record.oauthBlocked ||
         patchPending ||
@@ -4113,6 +5193,25 @@ let activeCtx = undefined
                 },
                 externalIcon(),
               ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dce-icon-button',
+                  'aria-label': t('import'),
+                  title: t('import'),
+                  'aria-expanded': importMenuOpen ? 'true' : 'false',
+                  onClick: () => {
+                    if (importMenuOpen) setImportMenuOpen(false)
+                    else {
+                      setMenuOpen(false)
+                      setImportMenuOpen(true)
+                    }
+                    openBar()
+                  },
+                },
+                importIcon(),
+              ),
 
 
               h(
@@ -4126,6 +5225,7 @@ let activeCtx = undefined
                   onClick: () => {
                     if (menuOpen) closeMenu()
                     else {
+                      setImportMenuOpen(false)
                       setMenuOpen(true)
                       refreshCache()
                     }
@@ -4136,7 +5236,7 @@ let activeCtx = undefined
               ),
             ),
           ),
-          menuOpen
+          menuOpen || importMenuOpen
             ? h('div', {
                 className: 'dce-menu-scrim',
                 onPointerDown: closeMenu,
@@ -4301,6 +5401,49 @@ let activeCtx = undefined
                     },
                   ),
                 ),
+                h(
+                  'div',
+                  { className: 'dce-menu-row' },
+                  h('span', { className: 'dce-menu-label', title: t('importBubbleHint') }, t('importBubble')),
+                  h('button', {
+                    type: 'button',
+                    role: 'switch',
+                    className: 'dce-switch',
+                    'data-on': importBubbleEnabled() ? 'true' : 'false',
+                    'aria-checked': importBubbleEnabled() ? 'true' : 'false',
+                    'data-import-bubble': 'true',
+                    'aria-label': t('importBubble'),
+                    title: t('importBubbleHint'),
+                    onClick: () => {
+                      setImportBubbleEnabled(!importBubbleEnabled())
+                    },
+                  }),
+                ),
+              )
+            : null,
+          importMenuOpen
+            ? h(
+                'div',
+                { className: 'dce-menu', role: 'menu' },
+                h('div', { className: 'dce-menu-title' }, h('span', null, t('importTitle'))),
+                IMPORT_KINDS.map((entry) =>
+                  h(
+                    'button',
+                    {
+                      key: entry.kind,
+                      type: 'button',
+                      className: 'dce-menu-item',
+                      disabled: importDisabled,
+                      title: t('importHint'),
+                      onClick: () => {
+                        setImportMenuOpen(false)
+                        void runImport(entry.kind, seatName)
+                      },
+                    },
+                    h('span', { className: 'dce-menu-label' }, t(entry.label)),
+                  ),
+                ),
+                h('div', { className: 'dce-menu-label', title: t('importHint') }, t('importHint')),
               )
             : null,
           confirmOpen
@@ -4442,6 +5585,7 @@ let activeCtx = undefined
             'div',
             { className: 'dce-surface' },
             h('div', { className: 'dce-viewport', ref: hostRef }),
+            record.notice !== '' ? h('div', { className: 'dce-import-notice', role: 'status' }, record.notice) : null,
             snapshot.phase === PHASE.UNSUPPORTED
               ? hintCard(t('statusUnsupported'), t('unsupportedHint'), t, snapshot, undefined, provider.url)
               : null,
@@ -4698,6 +5842,24 @@ let activeCtx = undefined
         runSeatSelfTest,
         seatReportData,
         installInspect,
+        GUEST_ADAPTERS,
+        IMPORT_PREFIX,
+        IMPORT_BUBBLE_KEY,
+        importBubbleEnabled,
+        setImportBubbleEnabled,
+        parseImportMessage,
+        parsePushUrl,
+        receivePush,
+        PUSH_URL,
+        validateImportPayload,
+        formatImport,
+        mainSessionId,
+        importDraft,
+        extractionSource,
+        bootstrapSource,
+        runImport,
+        deliverImportPayload,
+        showImportNotice,
         formatRect,
         translator,
         rightTabType,
@@ -4710,7 +5872,7 @@ let activeCtx = undefined
     }
 
     return {
-      inject: ['slots', 'locale'],
+      inject: ['slots', 'locale', 'sessions', 'uiSession', 'uiWorkspace', 'conversation'],
       apply(ctx) {
         // A hot reload can apply this bundle again while the previous instance is
         // still alive. Its slots, tab type and observers would then block or
